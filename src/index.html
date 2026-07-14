@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mirr</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="bg"><div class="orb a"></div><div class="orb b"></div><div class="orb c"></div><div class="orb d"></div></div>
+  <div class="grain"></div>
+
+  <div class="app">
+    <!-- Sidebar -->
+    <nav class="rail glass">
+      <div class="logo" title="Mirr">
+        <svg viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,.96)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 18V7l4.5 5L13 7v11"/><path d="M16.5 18V7L20 10.5"/>
+        </svg>
+      </div>
+      <button class="navbtn active" data-view="receive" aria-label="AirPlay Receive">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21l4-4 4 4Z" fill="currentColor" stroke="none"/></svg>
+        <span class="navtip">AirPlay · Receive</span>
+      </button>
+      <button class="navbtn" data-view="airplay2" aria-label="AirPlay 2 Audio">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 18V6l10-2v12"/><circle cx="6" cy="18" r="2.4"/><circle cx="16" cy="16" r="2.4"/></svg>
+        <span class="navtip">AirPlay 2 · Audio</span>
+      </button>
+      <button class="navbtn" data-view="cast" aria-label="AirCast">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 16a6 6 0 0 1 6 6M2 12a10 10 0 0 1 10 10"/><circle cx="3" cy="21" r="1.4" fill="currentColor"/><rect x="11" y="4" width="11" height="9" rx="2"/></svg>
+        <span class="navtip">AirCast · Send</span>
+      </button>
+      <button class="navbtn" data-view="localsend" aria-label="LocalSend">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 19V5M5 12l7-7 7 7"/><path d="M5 21h14"/></svg>
+        <span class="navtip">LocalSend · Transfer</span>
+      </button>
+      <div class="spacer"></div>
+      <button class="navbtn" data-view="settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+        <span class="navtip">Settings</span>
+      </button>
+    </nav>
+
+    <div class="main">
+      <header class="topbar glass" data-tauri-drag-region>
+        <div data-tauri-drag-region>
+          <h1 id="vtitle">AirPlay Receiver</h1>
+          <div class="sub" id="vsub">Your PC appears as “Mirr”</div>
+        </div>
+        <div class="right">
+          <div class="pill" id="discoPill"><span class="dot off" id="discoDot"></span> <span id="disco">Starting…</span></div>
+          <div class="winctl" id="winctl" hidden>
+            <button class="wbtn" id="wmin" aria-label="Minimize"><svg viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.2"><path d="M1 6h10"/></svg></button>
+            <button class="wbtn" id="wmax" aria-label="Maximize"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="1.5" y="1.5" width="9" height="9" rx="1.5"/></svg></button>
+            <button class="wbtn close" id="wclose" aria-label="Close"><svg viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.2"><path d="M2 2l8 8M10 2l-8 8"/></svg></button>
+          </div>
+        </div>
+      </header>
+
+      <section class="stage glass">
+
+        <!-- AIRPLAY RECEIVE -->
+        <div class="view show" id="receive">
+          <div class="screen">
+            <!-- The native mirror video is docked exactly over this element -->
+            <div id="videoHost"></div>
+            <div class="empty" id="rxEmpty">
+              <div class="radar"><span></span><span></span><span></span>
+                <div class="core"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8"/></svg></div>
+              </div>
+              <div>
+                <div class="rx-title" id="rxTitle">Starting receiver…</div>
+                <div class="rx-sub" id="rxSub">One moment</div>
+              </div>
+              <button class="btn" id="rxRetry" hidden>Restart receiver</button>
+            </div>
+            <div class="mirror" id="rxMirror"><div class="badge">📱 iPhone — demo mirror · 1080p60</div></div>
+          </div>
+          <div class="controls tile">
+            <div class="title">Receive session<small id="rxState">Idle</small></div>
+            <div class="grow"></div>
+            <div class="zoomctl" id="zoomCtl" hidden>
+              <button class="btn ghost zbtn" id="zoomOut" aria-label="Zoom out">−</button>
+              <button class="zoomlbl" id="zoomLbl" title="Reset zoom">100%</button>
+              <button class="btn ghost zbtn" id="zoomIn" aria-label="Zoom in">+</button>
+            </div>
+            <button class="btn ghost" id="theaterBtn" hidden>⤢ Theater</button>
+            <button class="btn primary" id="rxBtn">Simulate device connect</button>
+          </div>
+          <div class="section-h mt">On your network <span class="tag" id="rxEngineTag"></span></div>
+          <div class="grid" id="rxDevices"></div>
+        </div>
+
+        <!-- AIRPLAY 2 (audio receive: lossless / multi-room) -->
+        <div class="view" id="airplay2">
+          <div class="now tile">
+            <div class="albumart"></div>
+            <div class="info">
+              <div class="track" id="a2track">Nothing playing</div>
+              <div class="artist" id="a2sub">Waiting for an AirPlay 2 source · lossless ALAC up to 24-bit/48 kHz</div>
+              <div class="wave" id="a2wave"></div>
+            </div>
+            <button class="btn primary" id="a2btn">Simulate stream</button>
+          </div>
+          <div class="section-h">Multi-room group</div>
+          <div id="a2rooms"></div>
+          <div class="notice warn"><b>Honest scope:</b> the open AirPlay-2 receiver engine (<code>shairport-sync</code>) is Linux/BSD-only. On Windows this ships via a bundled engine sidecar; treat lossless multi-room <b>receive</b> as a stretch goal. AirPlay-1 audio receive works today.</div>
+        </div>
+
+        <!-- AIRCAST (send PC audio to speakers) -->
+        <div class="view" id="cast">
+          <div class="now tile">
+            <div class="albumart"></div>
+            <div class="info">
+              <div class="track">This PC’s audio</div>
+              <div class="artist">Captured via WASAPI loopback → streamed over RAOP</div>
+              <div class="wave" id="castwave"></div>
+            </div>
+            <button class="btn" id="castPlay">▶ Stream</button>
+          </div>
+          <div class="section-h">Cast to AirPlay speakers on your network</div>
+          <div id="rooms"></div>
+          <div class="notice warn">Classic AirPlay targets work via RAOP (<code>pyatv</code>). AirPlay-2-only devices (e.g. HomePod) need pairing &amp; encryption and aren’t guaranteed without an Apple license.</div>
+        </div>
+
+        <!-- LOCALSEND -->
+        <div class="view" id="localsend">
+          <div class="section-h">Nearby devices <span class="tag" id="lsScan">· scanning…</span></div>
+          <div class="ls-wrap">
+            <div>
+              <div class="peerlist" id="lsPeers"></div>
+            </div>
+            <div>
+              <div class="drop" id="drop">
+                <svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.6" style="margin:0 auto"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M5 20h14"/></svg>
+                <div class="big">Drop a file to share</div>
+                <div class="small" id="dropHint">or pick a device from the list</div>
+              </div>
+              <div class="transfer tile" id="transfer">
+                <div class="row"><b id="tfName">file</b> → <span id="tfDev">device</span></div>
+                <div class="bar" id="tfBarWrap"><i id="tfBar"></i></div>
+                <div class="small" id="tfPct" style="font-size:12px;color:var(--text-dim);margin-top:8px">Sending…</div>
+              </div>
+              <div class="notice good"><b>LocalSend</b> is a real, cross-platform, MIT-licensed protocol: UDP multicast discovery on 224.0.0.167:53317 + an HTTP file API. Received files land in <b>Downloads\Mirr</b>. The other device just needs the LocalSend app.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SETTINGS -->
+        <div class="view" id="settings">
+          <div class="section-h">Identity</div>
+          <div class="srow tile"><div class="st"><div class="lab">AirPlay name</div><div class="desc">How this PC appears in the iOS Screen Mirroring sheet.</div></div><div class="val">Mirr</div></div>
+          <div class="srow tile"><div class="st"><div class="lab">LocalSend alias</div><div class="desc">How this PC appears to LocalSend devices.</div></div><div class="val" id="setName">Mirr</div></div>
+          <div class="section-h mt">Capabilities</div>
+          <div class="srow tile"><div class="st"><div class="lab">AirPlay receive — screen + audio</div><div class="desc">UxPlay/GStreamer engine, supervised with a hidden console. Video docks straight into this window.</div></div><span class="feasbadge fb-yes">SHIPS NOW</span></div>
+          <div class="srow tile"><div class="st"><div class="lab">LocalSend transfer</div><div class="desc">Native Rust implementation of the LocalSend v2 protocol. Cross-platform.</div></div><span class="feasbadge fb-yes">SHIPS NOW</span></div>
+          <div class="srow tile"><div class="st"><div class="lab">AirCast — send audio to speakers</div><div class="desc">RAOP via pyatv sidecar. Classic AirPlay targets fully; AirPlay-2-only targets partial.</div></div><span class="feasbadge fb-part">ENGINE NOT BUNDLED</span></div>
+          <div class="srow tile"><div class="st"><div class="lab">AirPlay 2 audio receive (lossless / multi-room)</div><div class="desc">shairport-sync’s AirPlay-2 build is Linux-only — stretch goal on Windows.</div></div><span class="feasbadge fb-part">STRETCH</span></div>
+          <div class="section-h mt">About</div>
+          <div class="srow tile"><div class="st"><div class="lab">Mirr</div><div class="desc">Windows 11 Apple wireless bridge · Tauri 2 (Rust + WebView2) · Liquid Glass UI<br>github.com/toasted-aep/mirr</div></div><div class="val" id="verTag">v1.0.0</div></div>
+        </div>
+
+      </section>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts"></div>
+  <div class="envtag" id="envtag">demo</div>
+  <script src="app.js"></script>
+</body>
+</html>

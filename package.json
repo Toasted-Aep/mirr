@@ -1,0 +1,15 @@
+{
+  "name": "mirr",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mirr — Windows 11 Apple wireless bridge (AirPlay / AirPlay 2 / AirCast / LocalSend) with a Liquid Glass UI",
+  "scripts": {
+    "ui": "python -m http.server 8777 --bind 127.0.0.1 --directory src",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}
