@@ -75,16 +75,63 @@
               <button class="btn" id="rxRetry" hidden>Restart receiver</button>
             </div>
             <div class="mirror" id="rxMirror"><div class="badge">📱 iPhone — demo mirror · 1080p60</div></div>
+
+            <!-- Audio-only Now Playing stage: sibling of #videoHost/#rxEmpty, shown
+                 when an audio-only AirPlay session is active and mirroring is not. -->
+            <div class="npstage" id="npStage" hidden>
+              <div class="npbg" id="npBg"></div>
+              <div class="npcol">
+                <div class="npart albumart" id="npArt">
+                  <svg class="npnote" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6l10-2v12"/><circle cx="6" cy="18" r="2.4"/><circle cx="16" cy="16" r="2.4"/></svg>
+                </div>
+                <div class="nptitle" id="npTitle">Audio from your device</div>
+                <div class="npartist" id="npArtist">Waiting for track info…</div>
+                <div class="npprog">
+                  <span class="nptime" id="npElapsed">–:––</span>
+                  <div class="bar busy" id="npBarWrap"><i id="npBar"></i></div>
+                  <span class="nptime" id="npRemain">–:––</span>
+                </div>
+                <div class="nptransport" id="npTransport" hidden>
+                  <button class="tbtn" id="npPrev" aria-label="Previous track">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M19 5v14L8 12l11-7Z"/><path d="M6 5v14"/></svg>
+                  </button>
+                  <button class="tplay" id="npPlay" aria-label="Play or pause">
+                    <svg viewBox="0 0 24 24" fill="currentColor" id="npPlayIcon"><path d="M8 5v14l11-7Z"/></svg>
+                  </button>
+                  <button class="tbtn" id="npNext" aria-label="Next track">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5v14l11-7Z"/><path d="M18 5v14"/></svg>
+                  </button>
+                  <div class="npvol">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 5V4L8 9Z"/></svg>
+                    <input type="range" min="0" max="100" value="70" id="npVol" aria-label="Volume">
+                  </div>
+                </div>
+                <div class="wave" id="npWave"></div>
+              </div>
+            </div>
           </div>
           <div class="controls tile">
             <div class="title">Receive session<small id="rxState">Idle</small></div>
             <div class="grow"></div>
+            <div class="mtransport" id="mTransport" hidden>
+              <button class="tbtn" id="mPrev" aria-label="Previous track">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M19 5v14L8 12l11-7Z"/><path d="M6 5v14"/></svg>
+              </button>
+              <button class="tbtn" id="mPlay" aria-label="Play or pause">
+                <svg viewBox="0 0 24 24" fill="currentColor" id="mPlayIcon"><path d="M8 5v14l11-7Z"/></svg>
+              </button>
+              <button class="tbtn" id="mNext" aria-label="Next track">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5v14l11-7Z"/><path d="M18 5v14"/></svg>
+              </button>
+              <input type="range" min="0" max="100" value="70" id="mVol" aria-label="Volume">
+            </div>
             <div class="zoomctl" id="zoomCtl" hidden>
               <button class="btn ghost zbtn" id="zoomOut" aria-label="Zoom out">−</button>
               <button class="zoomlbl" id="zoomLbl" title="Reset zoom">100%</button>
               <button class="btn ghost zbtn" id="zoomIn" aria-label="Zoom in">+</button>
             </div>
             <button class="btn ghost" id="theaterBtn" hidden>⤢ Theater</button>
+            <button class="btn ghost" id="npDemoBtn" hidden>Simulate audio stream</button>
             <button class="btn primary" id="rxBtn">Simulate device connect</button>
           </div>
           <div class="section-h mt">On your network <span class="tag" id="rxEngineTag"></span></div>

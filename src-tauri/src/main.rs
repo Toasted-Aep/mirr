@@ -2,11 +2,13 @@
 // AirPlay (receive) · AirPlay 2 (audio) · AirCast (send) · LocalSend (transfer)
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod dacp;
 mod discovery;
 #[cfg(windows)]
 mod embed;
 mod engines;
 mod localsend;
+mod nowplaying;
 
 use tauri::Emitter;
 
@@ -50,6 +52,26 @@ fn stop_airplay_receiver(app: tauri::AppHandle) {
 #[tauri::command]
 fn receiver_state() -> serde_json::Value {
     engines::receiver_state()
+}
+
+#[tauri::command]
+fn nowplaying_state() -> serde_json::Value {
+    nowplaying::state()
+}
+
+#[tauri::command]
+fn dacp_state() -> serde_json::Value {
+    dacp::state()
+}
+
+#[tauri::command]
+async fn dacp_command(cmd: String) -> Result<u16, String> {
+    dacp::command(cmd).await
+}
+
+#[tauri::command]
+async fn dacp_set_volume(pct: f32) -> Result<u16, String> {
+    dacp::set_volume(pct).await
 }
 
 #[tauri::command]
@@ -130,6 +152,10 @@ fn main() {
             start_airplay_receiver,
             stop_airplay_receiver,
             receiver_state,
+            nowplaying_state,
+            dacp_state,
+            dacp_command,
+            dacp_set_volume,
             start_aircast,
             start_airplay2_receiver,
             set_video_rect,

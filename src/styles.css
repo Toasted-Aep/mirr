@@ -172,6 +172,52 @@ body.idlebg .orb{animation-play-state:paused;}
    side glues the GStreamer output exactly over this element. */
 #videoHost{position:absolute;inset:0;}
 
+/* ---------- now playing: audio-only session stage ---------- */
+.npstage{position:absolute;inset:0;z-index:3;display:grid;place-items:center;overflow:hidden;}
+.npstage[hidden]{display:none;}
+.npbg{position:absolute;inset:-40px;background:linear-gradient(150deg,#7db2ff,#c894ff 60%,#ff8ec0);
+  background-size:cover;background-position:center;filter:blur(64px) saturate(150%) brightness(.55);
+  opacity:.4;transition:opacity .8s var(--ease),background-image .8s var(--ease);}
+.npbg.has-art{opacity:.6;}
+.npcol{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;gap:14px;
+  max-width:480px;padding:24px;text-align:center;}
+.npart{width:220px;height:220px;flex:0 0 220px;border-radius:22px;background-size:cover;background-position:center;
+  display:grid;place-items:center;position:relative;overflow:hidden;
+  box-shadow:0 24px 60px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.5);
+  transition:background-image .5s var(--ease);}
+.npart .npnote{width:56px;height:56px;opacity:.4;position:relative;z-index:1;}
+.npart.has-art .npnote{display:none;}
+.nptitle{font-size:19px;font-weight:600;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.npartist{font-size:13px;color:var(--text-dim);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.npprog{display:flex;align-items:center;gap:10px;width:min(420px,70%);}
+.npprog .bar{flex:1;margin:0;}
+.nptime{font-size:11.5px;color:var(--text-dim);font-variant-numeric:tabular-nums;flex:0 0 auto;}
+.nptransport{display:flex;align-items:center;gap:10px;margin-top:2px;}
+.nptransport[hidden]{display:none;}
+.tbtn{width:40px;height:40px;border-radius:50%;border:1px solid var(--stroke-soft);background:var(--tile-bg);
+  color:var(--text);display:grid;place-items:center;cursor:pointer;transition:all .3s var(--spring);}
+.tbtn:hover{background:var(--tile-bg-hover);transform:translateY(-1px);}
+.tbtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+.tbtn svg{width:18px;height:18px;}
+.tplay{width:54px;height:54px;border-radius:50%;border:none;display:grid;place-items:center;cursor:pointer;
+  background:linear-gradient(150deg,var(--accent),var(--accent2));color:#0a0d1c;
+  box-shadow:0 8px 22px rgba(125,150,255,.38),inset 0 1px 0 rgba(255,255,255,.5);transition:transform .3s var(--spring);}
+.tplay:hover{transform:scale(1.06);}
+.tplay:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+.tplay svg{width:22px;height:22px;}
+.npvol{display:flex;align-items:center;gap:6px;color:var(--text-dim);margin-left:6px;}
+.npvol svg{width:16px;height:16px;flex:0 0 16px;}
+.npvol input[type=range]{width:120px;}
+#npWave{opacity:.6;height:18px;}
+
+/* compact transport cluster in the mirror-session controls row — same
+   token vocabulary, smaller footprint, works during mirroring too */
+.mtransport{display:flex;align-items:center;gap:6px;}
+.mtransport[hidden]{display:none;}
+.mtransport .tbtn{width:32px;height:32px;}
+.mtransport .tbtn svg{width:14px;height:14px;}
+.mtransport input[type=range]{width:90px;}
+
 .controls{display:flex;align-items:center;gap:14px;margin-top:16px;padding:13px 18px;flex:0 0 auto;}
 .controls .title{font-size:14px;font-weight:600;}
 .controls .title small{display:block;font-weight:400;color:var(--text-dim);font-size:11.5px;margin-top:2px;}
@@ -293,7 +339,8 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.15);}
 
 /* while a mirror session is live, the receive view collapses to just the
    stage — nothing below the fold, so nothing to scroll the video over */
-body.mirroring #receive .section-h,body.mirroring #receive .grid{display:none;}
+body.mirroring #receive .section-h,body.mirroring #receive .grid,
+body.nowplaying #receive .section-h,body.nowplaying #receive .grid{display:none;}
 
 /* ---------- theater mode: pitch black, nothing but the stream ---------- */
 body.theater{background:#000;}

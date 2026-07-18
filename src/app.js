@@ -110,8 +110,20 @@ const DEMO = {
    AirPlay receive — engine state machine + native video docking
    ============================================================ */
 let engineState = "starting"; // starting | ready | connecting | mirroring | stopped | error
+let engineDetail = ""; // last detail string, so a repaint can't lose an error message
 let mirroring = false;
 let zoom = 100;
+
+/* ---------- audio-only Now Playing session ---------- */
+let npActive = false;
+let dacpAvailable = false;
+let npMeta = { title: "", artist: "", album: "", hasData: false, rev: -1 };
+// local 1 Hz elapsed-time ticker: extrapolated from the last progress
+// baseline using the wall clock, re-baselined on every progress event
+const np = { baseSec: null, durSec: null, baseWall: 0, playing: false };
+// same track info the AirPlay-2 demo button uses — reused for the
+// Now Playing stage's "Simulate audio stream" demo path
+const DEMO_TRACK = { title: "Resonance — Ambient Mix", artist: "Aurora Fields", album: "Night Drift" };
 
 function setDisco(txt, dotCls) {
   $("disco").textContent = txt;
@@ -120,6 +132,7 @@ function setDisco(txt, dotCls) {
 
 function applyEngineState(state, detail) {
   engineState = state;
+  engineDetail = detail || "";
   const title = $("rxTitle"), sub = $("rxSub"), retry = $("rxRetry"), st = $("rxState");
   retry.hidden = true;
   switch (state) {
@@ -168,13 +181,160 @@ function syncRxButton() {
   rxBtn.textContent = (engineState === "stopped" || engineState === "error") ? "Start receiver" : "Stop receiver";
 }
 
+/* ---------- Now Playing stage: pure function of (mirroring, npActive) ----------
+   Mirror always wins. Drives body.nowplaying, npStage visibility, rxEmpty
+   visibility (jointly with mirroring), the transport clusters, and the
+   rxState/topbar copy while an audio session owns the stage. */
+function renderStage() {
+  const showNp = !mirroring && npActive;
+  document.body.classList.toggle("nowplaying", showNp);
+  $("npStage").hidden = !showNp;
+  $("rxEmpty").classList.toggle("hide", mirroring || showNp);
+  $("npTransport").hidden = !dacpAvailable;
+  $("mTransport").hidden = !(mirroring && dacpAvailable);
+  if (showNp) {
+    const title = npMeta.hasData && npMeta.title ? npMeta.title : "Audio session live";
+    $("rxState").textContent = "Audio session · " + title;
+    setDisco("Audio session", "pulse");
+  } else {
+    // the audio stage no longer owns the copy — hand the pill/label back to
+    // the engine state (never recurses: applyEngineState doesn't call us)
+    applyEngineState(engineState, engineDetail);
+  }
+}
+
+function fmtTime(s) {
+  s = Math.max(0, Math.floor(s));
+  const m = Math.floor(s / 60), sec = s % 60;
+  return m + ":" + String(sec).padStart(2, "0");
+}
+
+/* indeterminate <-> ticking <-> frozen, per the local 1 Hz ticker */
+function resetNpProgress() {
+  np.baseSec = null; np.durSec = null; np.baseWall = 0; np.playing = false;
+  updatePlayIcon(false);
+  $("npBarWrap").classList.add("busy");
+  $("npBar").style.width = "";
+  $("npElapsed").textContent = "–:––";
+  $("npRemain").textContent = "–:––";
+}
+
+function renderNpProgress() {
+  if (!npActive || np.baseSec == null || !np.durSec) {
+    $("npBarWrap").classList.add("busy");
+    return;
+  }
+  let elapsed = np.playing ? np.baseSec + (Date.now() - np.baseWall) / 1000 : np.baseSec;
+  elapsed = Math.max(0, Math.min(elapsed, np.durSec));
+  // clamp-freeze at duration (guarded so the icon repaints once, not per tick)
+  if (np.playing && elapsed >= np.durSec) { np.playing = false; updatePlayIcon(false); }
+  $("npBarWrap").classList.remove("busy");
+  $("npElapsed").textContent = fmtTime(elapsed);
+  $("npRemain").textContent = "−" + fmtTime(np.durSec - elapsed);
+  $("npBar").style.width = (np.durSec > 0 ? (elapsed / np.durSec * 100) : 0) + "%";
+}
+setInterval(renderNpProgress, 1000);
+
+/* re-baseline on every nowplaying://progress event (and on late-attach
+   rehydration, where ageMs backdates baseWall) */
+function setNpProgress(position, duration, ageMs) {
+  np.baseSec = position;
+  np.durSec = duration;
+  np.baseWall = Date.now() - (ageMs || 0);
+  np.playing = true;
+  updatePlayIcon(true);
+  renderNpProgress();
+}
+
+function setNpArt(dataUrl) {
+  const art = $("npArt"), bg = $("npBg");
+  if (dataUrl) {
+    art.style.backgroundImage = `url("${dataUrl}")`;
+    art.classList.add("has-art");
+    bg.style.backgroundImage = `url("${dataUrl}")`;
+    bg.classList.add("has-art");
+  } else {
+    art.style.backgroundImage = "";
+    art.classList.remove("has-art");
+    bg.style.backgroundImage = "";
+    bg.classList.remove("has-art");
+  }
+}
+
+function setNpMeta(meta) {
+  meta = meta || {};
+  const revChanged = meta.rev !== npMeta.rev;
+  npMeta = { title: meta.title || "", artist: meta.artist || "", album: meta.album || "",
+    hasData: !!meta.hasData, rev: meta.rev };
+  $("npTitle").textContent = npMeta.hasData && npMeta.title ? npMeta.title : "Audio from your device";
+  let artistLine = "";
+  if (npMeta.hasData) {
+    artistLine = npMeta.artist || "";
+    if (npMeta.album) artistLine += artistLine ? " · " + npMeta.album : npMeta.album;
+  }
+  $("npArtist").textContent = artistLine || "Waiting for track info…";
+  // -md rewrites happen on every SETUP; art always clears to placeholder
+  // here and repaints only when the next nowplaying://art event lands
+  // (stale-art caveat from R1) — never assume the old art still matches.
+  setNpArt(null);
+  if (revChanged) resetNpProgress();
+  renderStage();
+}
+
+function updatePlayIcon(playing) {
+  const path = playing
+    ? '<path d="M8 6h3v12H8zM13 6h3v12h-3z"/>'
+    : '<path d="M8 5v14l11-7Z"/>';
+  $("npPlayIcon").innerHTML = path;
+  $("mPlayIcon").innerHTML = path;
+}
+
+/* dacp_command failures are always quiet — a non-2xx just means the app on
+   the phone doesn't support this command, not an error worth a toast */
+function sendTransport(cmd) {
+  if (!TAURI) { toast("Demo mode — connect a real device for transport control"); return; }
+  invoke("dacp_command", { cmd }).then((code) => {
+    if (cmd === "playpause" && code >= 200 && code < 300) {
+      // fold the already-ticked time into the baseline first, otherwise a
+      // pause snaps the bar back to the last progress line (the phone
+      // re-baselines us shortly after anyway)
+      if (np.playing && np.baseSec != null)
+        np.baseSec = Math.min(np.durSec ?? Infinity, np.baseSec + (Date.now() - np.baseWall) / 1000);
+      np.playing = !np.playing;
+      np.baseWall = Date.now();
+      updatePlayIcon(np.playing);
+      renderNpProgress();
+    }
+  }).catch(() => {});
+}
+["npPrev", "mPrev"].forEach(id => $(id).addEventListener("click", () => sendTransport("previtem")));
+["npNext", "mNext"].forEach(id => $(id).addEventListener("click", () => sendTransport("nextitem")));
+["npPlay", "mPlay"].forEach(id => $(id).addEventListener("click", () => sendTransport("playpause")));
+
+let volDebounce = null;
+function sendVolume(pct) {
+  if (!TAURI) return;
+  clearTimeout(volDebounce);
+  volDebounce = setTimeout(() => {
+    invoke("dacp_set_volume", { pct: Number(pct) }).catch(() => {});
+  }, 150);
+}
+$("npVol").addEventListener("input", (e) => { $("mVol").value = e.target.value; sendVolume(e.target.value); });
+$("mVol").addEventListener("input", (e) => { $("npVol").value = e.target.value; sendVolume(e.target.value); });
+
+/* media keys — trivial to wire, silent no-op when unsupported */
+window.addEventListener("keydown", (e) => {
+  if (e.key === "MediaPlayPause" || e.key === "MediaPlay" || e.key === "MediaPause") sendTransport("playpause");
+  else if (e.key === "MediaTrackNext") sendTransport("nextitem");
+  else if (e.key === "MediaTrackPrevious") sendTransport("previtem");
+});
+
 /* enter/leave the live-mirror layout. `nextState` is the engine state to
    show after leaving (e.g. "stopped" when the engine died mid-mirror). */
 function setMirroring(on, nextState, detail) {
   if (mirroring === on && !nextState) { /* idempotent */ }
   mirroring = on;
   document.body.classList.toggle("mirroring", on);
-  $("rxEmpty").classList.toggle("hide", on);
   $("theaterBtn").hidden = !on;
   $("zoomCtl").hidden = !on;
   document.body.classList.toggle("idlebg", on || document.hidden);
@@ -185,6 +345,7 @@ function setMirroring(on, nextState, detail) {
     setZoom(100, true);
     applyEngineState(nextState || "ready", detail);
   }
+  renderStage();
   reportRectSoon();
 }
 
@@ -269,6 +430,7 @@ if (TAURI) {
 } else {
   rxBtn.addEventListener("click", () => {
     const on = !$("rxMirror").classList.contains("live");
+    if (on) stopDemoNowPlaying(); // mirror wins — leave the Now Playing demo
     $("rxMirror").classList.toggle("live", on);
     $("rxEmpty").classList.toggle("hide", on);
     $("rxState").textContent = on ? "Connected · iPhone 16 Pro · 1080p60 · ~42 ms latency" : "Idle — demo";
@@ -276,6 +438,32 @@ if (TAURI) {
     rxBtn.classList.toggle("danger", on);
     rxBtn.classList.toggle("primary", !on);
   });
+  // demo mode: explore the Now Playing stage without a real device,
+  // reusing the same track info as the AirPlay-2 "Simulate stream" demo
+  $("npDemoBtn").hidden = false;
+  $("npDemoBtn").addEventListener("click", () => {
+    if (npActive) stopDemoNowPlaying(); else startDemoNowPlaying();
+  });
+}
+
+function startDemoNowPlaying() {
+  if ($("rxMirror").classList.contains("live")) return; // mirror wins
+  npActive = true;
+  dacpAvailable = true;
+  setNpMeta({ title: DEMO_TRACK.title, artist: DEMO_TRACK.artist, album: DEMO_TRACK.album, hasData: true, rev: Date.now() });
+  setNpProgress(12, 222, 0);
+  updatePlayIcon(true);
+  $("npDemoBtn").textContent = "Stop audio stream";
+  renderStage();
+}
+function stopDemoNowPlaying() {
+  if (!npActive) return;
+  npActive = false;
+  dacpAvailable = false;
+  resetNpProgress();
+  $("npDemoBtn").textContent = "Simulate audio stream";
+  renderStage();
+  $("rxState").textContent = "Idle — demo"; // same override loadDemo() uses
 }
 
 let lastDevicesJson = "";
@@ -310,7 +498,7 @@ function buildWave(id) {
     w.appendChild(b);
   }
 }
-buildWave("a2wave"); buildWave("castwave");
+buildWave("a2wave"); buildWave("castwave"); buildWave("npWave");
 
 /* ---------- AirPlay 2 ---------- */
 $("a2btn").addEventListener("click", function () {
@@ -323,7 +511,7 @@ $("a2btn").addEventListener("click", function () {
   }
   const t = $("a2track"), s = $("a2sub"), w = $("a2wave");
   if (t.textContent === "Nothing playing") {
-    t.textContent = "Resonance — Ambient Mix";
+    t.textContent = DEMO_TRACK.title;
     s.textContent = "From iPhone · ALAC 24-bit/48 kHz · 3 rooms in sync";
     w.classList.add("on"); this.textContent = "Stop";
   } else {
@@ -510,10 +698,30 @@ async function loadFromBackend() {
       const { state, detail } = e.payload || {};
       if (!state) return;
       if (state === "stopped" || state === "error") {
-        if (mirroring) setMirroring(false, state, detail);
+        // the engine dying ends any audio-only session with it. Clear the
+        // flags *before* anything repaints, so no intermediate renderStage()
+        // (setMirroring's, setNpMeta's) can leave the stage looking live.
+        const hadNp = npActive;
+        npActive = false;
+        if (hadNp) dacpAvailable = false;
+        if (mirroring) setMirroring(false, state, detail); // repaints + renderStage()s
         else applyEngineState(state, detail);
-      } else if (!mirroring) {
+        if (hadNp) { setNpMeta({}); resetNpProgress(); }
+        renderStage();
+      } else if (!mirroring && !npActive) {
         applyEngineState(state, detail);
+      } else if (!mirroring) {
+        // an audio-only Now Playing stage owns the copy: engines.rs emits
+        // "connecting" on any connection-request line with no session
+        // awareness, so painting it here would flash amber "Connecting…" over
+        // a live audio session. Only book-keep. Anything non-terminal means
+        // the engine is up, so remember it as plain "ready": when the session
+        // ends, renderStage()'s else-branch repaints from these two vars and
+        // must land on "Ready for AirPlay" / "Discoverable as Mirr", not on a
+        // stale "Connecting…" left over from the session that just ended.
+        engineState = "ready";
+        engineDetail = "";
+        syncRxButton();
       }
     });
     listen("mirror://started", () => {
@@ -527,11 +735,47 @@ async function loadFromBackend() {
       nav(document.querySelector('[data-view=receive]'));
     });
 
+    // audio-only Now Playing lifecycle (mirror wins by construction, both
+    // here and in the backend FSM which deactivates NP on usingScreen=1)
+    listen("nowplaying://session", (e) => {
+      npActive = !!(e.payload && e.payload.active);
+      if (npActive) {
+        nav(document.querySelector('[data-view=receive]'));
+      } else {
+        setNpMeta({});
+        resetNpProgress();
+      }
+      renderStage();
+    });
+    listen("nowplaying://meta", (e) => setNpMeta(e.payload || {}));
+    listen("nowplaying://art", (e) => setNpArt((e.payload && e.payload.dataUrl) || null));
+    listen("nowplaying://progress", (e) => {
+      const p = e.payload || {};
+      setNpProgress(Number(p.position) || 0, Number(p.duration) || 0, 0);
+    });
+    listen("dacp://state", (e) => {
+      dacpAvailable = !!(e.payload && e.payload.available);
+      renderStage();
+    });
+
     // events emitted before our listeners attached are gone — ask for the
     // current state explicitly
     const st = await invoke("receiver_state").catch(() => null);
     if (st && st.state && !mirroring) applyEngineState(st.state, st.detail);
     if (await invoke("mirror_active").catch(() => false)) setMirroring(true);
+
+    const npSt = await invoke("nowplaying_state").catch(() => null);
+    if (npSt) {
+      npActive = !!npSt.active;
+      setNpMeta(npSt.meta || {});
+      if (npSt.artDataUrl) setNpArt(npSt.artDataUrl);
+      if (npSt.progress) {
+        setNpProgress(Number(npSt.progress.position) || 0, Number(npSt.progress.duration) || 0, Number(npSt.progress.ageMs) || 0);
+      }
+      renderStage();
+    }
+    const dacpSt = await invoke("dacp_state").catch(() => null);
+    if (dacpSt) { dacpAvailable = !!dacpSt.available; renderStage(); }
 
     renderRooms("a2rooms", DEMO.a2rooms); // illustration until AirPlay-2 engine ships
   } catch (err) {

@@ -134,6 +134,33 @@ fn resolve_uxplay(app: &AppHandle) -> anyhow::Result<(PathBuf, PathBuf, Option<P
     ))
 }
 
+/// Directory holding every uxplay export file (-md/-ca/-dacp).
+/// Pre-created before each spawn: uxplay exit(1)s if a path is unwritable.
+pub fn nowplaying_dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Mirr")
+        .join("nowplaying")
+}
+pub fn md_path() -> PathBuf {
+    nowplaying_dir().join("metadata.txt")
+}
+pub fn ca_path() -> PathBuf {
+    nowplaying_dir().join("coverart.img")
+}
+pub fn dacp_path() -> PathBuf {
+    nowplaying_dir().join("dacp.txt")
+}
+
+/// uxplay only removes its export files on graceful exit and we kill() it —
+/// stale tokens/art must be swept before every spawn and after every stop.
+pub fn clean_export_files() {
+    for p in [md_path(), ca_path(), dacp_path()] {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
 fn which(exe: &str) -> anyhow::Result<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     for dir in std::env::split_paths(&path) {
@@ -190,6 +217,13 @@ pub fn start_airplay_receiver(app: &AppHandle) -> anyhow::Result<()> {
     let (exe, bin, plugins) = resolve_uxplay(app)?;
     let name = "Mirr"; // the name iPhones see in the Screen Mirroring sheet
 
+    // Export dir must exist BEFORE spawn; degrade (no now-playing/remote)
+    // rather than let uxplay exit(1) on an unwritable path.
+    let exports_ok = std::fs::create_dir_all(nowplaying_dir()).is_ok();
+    if exports_ok {
+        clean_export_files();
+    }
+
     let mut cmd = Command::new(&exe);
     cmd.args([
         "-n", name,
@@ -201,6 +235,12 @@ pub fn start_airplay_receiver(app: &AppHandle) -> anyhow::Result<()> {
     .current_dir(&bin)
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
+
+    if exports_ok {
+        cmd.arg("-md").arg(md_path());
+        cmd.arg("-ca").arg(ca_path()); // explicit filename — bare -ca renders in-window on the patched 1.72
+        cmd.arg("-dacp").arg(dacp_path()); // explicit filename — bare -dacp is broken on Windows ($HOME unset)
+    }
 
     // Full-GPU pipeline (decode → convert → present without sysmem copies).
     // Only when the d3d11 plugin is actually present; otherwise UxPlay's
@@ -238,6 +278,9 @@ pub fn start_airplay_receiver(app: &AppHandle) -> anyhow::Result<()> {
         crate::embed::ensure_watcher(app.clone());
     }
     emit_status(app, "starting", name);
+
+    crate::nowplaying::ensure_watcher(app.clone());
+    crate::dacp::ensure_watcher(app.clone());
 
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
@@ -288,6 +331,8 @@ fn spawn_log_reader(app: AppHandle, generation: u64, pipe: impl std::io::Read + 
             if is_stream_stop_marker(&l) {
                 crate::embed::note_stream_stop(app.clone());
             }
+            crate::nowplaying::on_log_line(&app, line);
+            crate::dacp::on_log_line(&app, line);
             let _ = app.emit("airplay://log", line.to_string());
         }
         // EOF — the engine died or was stopped. Take the child under the lock
@@ -307,6 +352,9 @@ fn spawn_log_reader(app: AppHandle, generation: u64, pipe: impl std::io::Read + 
             crate::embed::set_engine_pid(0);
             let _ = child.wait();
             emit_status(&app, "stopped", "");
+            crate::nowplaying::on_engine_stop(&app);
+            crate::dacp::on_engine_stop(&app);
+            clean_export_files();
         }
     });
 }
@@ -327,6 +375,9 @@ pub fn stop_airplay_receiver(app: &AppHandle) {
         let _ = child.kill();
         let _ = child.wait();
         emit_status(app, "stopped", "");
+        crate::nowplaying::on_engine_stop(app);
+        crate::dacp::on_engine_stop(app);
+        clean_export_files();
     }
 }
 
@@ -401,4 +452,5 @@ pub fn shutdown_all() {
         }
         *child = None;
     }
+    clean_export_files();
 }

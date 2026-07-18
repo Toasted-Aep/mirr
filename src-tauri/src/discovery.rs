@@ -38,6 +38,13 @@ pub struct Target {
 
 static AIRPLAY: Lazy<Mutex<HashMap<String, Device>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static RAOP: Lazy<Mutex<HashMap<String, Target>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static DAEMON: once_cell::sync::OnceCell<ServiceDaemon> = once_cell::sync::OnceCell::new();
+
+/// The app's single mDNS daemon (also keeps it alive for the process).
+/// dacp.rs browses `_dacp._tcp` on it; falls back to its own daemon if None.
+pub fn shared_daemon() -> Option<ServiceDaemon> {
+    DAEMON.get().cloned()
+}
 
 pub fn airplay_devices() -> Vec<Device> {
     AIRPLAY.lock().unwrap().values().cloned().collect()
@@ -116,7 +123,7 @@ pub fn start() -> anyhow::Result<()> {
     });
 
     // keep the daemon alive for the whole process
-    std::mem::forget(mdns);
+    let _ = DAEMON.set(mdns);
     Ok(())
 }
 
