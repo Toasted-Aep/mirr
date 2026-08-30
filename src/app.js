@@ -113,6 +113,12 @@ let engineState = "starting"; // starting | ready | connecting | mirroring | sto
 let engineDetail = ""; // last detail string, so a repaint can't lose an error message
 let mirroring = false;
 let zoom = 100;
+let windowFocused = document.hasFocus();
+/* declared up here, not next to goActive(): loadDemo()/loadFromBackend() call
+   applyEngineState -> goActive() during load, which would hit the temporal dead
+   zone if these lived further down the file. */
+const CALM_AFTER_MS = 12000;
+let calmTimer = null;
 
 /* ---------- audio-only Now Playing session ---------- */
 let npActive = false;
@@ -131,6 +137,7 @@ function setDisco(txt, dotCls) {
 }
 
 function applyEngineState(state, detail) {
+  if (state !== engineState && typeof goActive === "function") goActive();
   engineState = state;
   engineDetail = detail || "";
   const title = $("rxTitle"), sub = $("rxSub"), retry = $("rxRetry"), st = $("rxState");
@@ -233,7 +240,8 @@ function renderNpProgress() {
   $("npRemain").textContent = "−" + fmtTime(np.durSec - elapsed);
   $("npBar").style.width = (np.durSec > 0 ? (elapsed / np.durSec * 100) : 0) + "%";
 }
-setInterval(renderNpProgress, 1000);
+// only ticks while an audio session owns the stage — no idle repaints
+setInterval(() => { if (npActive) renderNpProgress(); }, 1000);
 
 /* re-baseline on every nowplaying://progress event (and on late-attach
    rehydration, where ageMs backdates baseWall) */
@@ -337,7 +345,7 @@ function setMirroring(on, nextState, detail) {
   document.body.classList.toggle("mirroring", on);
   $("theaterBtn").hidden = !on;
   $("zoomCtl").hidden = !on;
-  document.body.classList.toggle("idlebg", on || document.hidden);
+  updateIdleBg(); // single source of truth: hidden / unfocused / mirroring
   if (on) {
     applyEngineState("mirroring");
   } else {
@@ -375,7 +383,11 @@ function reportRect() {
 }
 function reportRectSoon() { requestAnimationFrame(() => requestAnimationFrame(reportRect)); }
 if (TAURI) {
-  setInterval(reportRect, 250);
+  // 4 Hz while a native video window is actually docked (it must stay glued to
+  // the stage), 1 Hz otherwise — the idle ticks only exist to seed a target
+  // rect before a session starts, and every tick is a forced layout read.
+  let rectTick = 0;
+  setInterval(() => { if (mirroring || rectTick++ % 4 === 0) reportRect(); }, 250);
   window.addEventListener("resize", reportRectSoon);
   document.querySelector(".stage").addEventListener("scroll", reportRect, { passive: true });
   reportRectSoon();
@@ -561,10 +573,21 @@ function castTo(target) {
    ============================================================ */
 let peerCache = [];
 let selectedPeer = null;
+let lastPeersJson = "";
 
 function renderPeers(list) {
+  // The backend re-emits the whole peer list on every LocalSend announce, and
+  // every device on the LAN announces on its own timer — so without a guard
+  // this rebuilds N rows (innerHTML parse + 2N listeners) every few seconds
+  // forever, driven by other people's traffic, and silently drops the .sel
+  // highlight while the user is looking at it. Same dedupe as
+  // renderAirplayDevices/renderRooms. Cache and selection are refreshed first
+  // so the early return only ever skips DOM work, never state.
+  const json = JSON.stringify(list);
   peerCache = list;
   if (selectedPeer && !list.some(p => p.fingerprint === selectedPeer.fingerprint)) selectedPeer = null;
+  if (json === lastPeersJson) return;
+  lastPeersJson = json;
   const pl = $("lsPeers"); pl.innerHTML = "";
   if (!list.length) {
     pl.innerHTML = `<div class="peer-row tile"><div class="pic">${ICON.generic}</div><div><div class="pn">No devices yet</div><div class="pm">Open LocalSend on another device on this network</div></div></div>`;
@@ -686,11 +709,18 @@ async function loadFromBackend() {
       renderRooms("rooms", tg, castTo);
     };
     refreshDevices(); refreshTargets();
-    setInterval(refreshDevices, 5000);
-    setInterval(refreshTargets, 8000);
+    // skip polling entirely while the window is hidden — nothing can be seen,
+    // and each pass is an IPC round-trip plus a re-render diff
+    setInterval(() => { if (!document.hidden) refreshDevices(); }, 5000);
+    setInterval(() => { if (!document.hidden) refreshTargets(); }, 8000);
 
+    // Listener first, then snapshot: a peer registering in the gap between the
+    // snapshot and the listener attaching would be missed, and since
+    // localsend.rs only emits on change, that peer's next (identical)
+    // announcement is deduped and it never appears. renderPeers has its own
+    // change-guard, so the resulting duplicate render from the snapshot is free.
+    await listen("localsend://peers", (e) => renderPeers(e.payload || []));
     renderPeers(await invoke("list_localsend_peers").catch(() => []));
-    listen("localsend://peers", (e) => renderPeers(e.payload || []));
     listen("localsend://received", (e) => toast("Received " + basename((e.payload || {}).path || "a file")));
 
     // engine + mirror lifecycle
@@ -796,10 +826,31 @@ function loadDemo() {
 
 if (TAURI) { loadFromBackend(); } else { loadDemo(); }
 
-/* pause ambient animation when the window is hidden or a mirror is live */
-document.addEventListener("visibilitychange", () => {
-  document.body.classList.toggle("idlebg", document.hidden || mirroring);
-});
+/* Suspend ambient animation whenever nobody is looking, or live video owns the
+   stage. This is not cosmetic: the window is transparent + acrylic, so every
+   animated frame makes DWM recomposite the whole window behind it. */
+function updateIdleBg() {
+  document.body.classList.toggle("idlebg", document.hidden || !windowFocused || mirroring);
+}
+/* Idle-motion governor. The radar/pulse animations are the only thing running
+   when the app sits waiting for a device, and on this transparent+acrylic
+   window an active animation costs ~8% GPU + ~15% DWM no matter how few frames
+   it submits. So after a stretch of no interaction we stop them outright; any
+   activity brings them straight back. */
+function goActive() {
+  document.body.classList.remove("calm");
+  clearTimeout(calmTimer);
+  calmTimer = setTimeout(() => document.body.classList.add("calm"), CALM_AFTER_MS);
+}
+["pointermove", "pointerdown", "keydown", "wheel"].forEach(ev =>
+  window.addEventListener(ev, goActive, { passive: true }));
+window.addEventListener("focus", goActive);
+goActive();
+
+document.addEventListener("visibilitychange", updateIdleBg);
+window.addEventListener("blur", () => { windowFocused = false; updateIdleBg(); });
+window.addEventListener("focus", () => { windowFocused = true; updateIdleBg(); });
+updateIdleBg();
 
 /* deep-link: open a specific view via #hash (e.g. index.html#localsend) */
 function applyHash() {

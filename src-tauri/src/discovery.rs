@@ -46,12 +46,24 @@ pub fn shared_daemon() -> Option<ServiceDaemon> {
     DAEMON.get().cloned()
 }
 
+/// Sorted by name, deliberately: these come out of a HashMap, whose iteration
+/// order is arbitrary and can differ between two calls with identical contents.
+/// The UI polls this every 5 s and skips re-rendering when the JSON is
+/// unchanged, so an unstable order would rebuild the whole card grid on every
+/// poll (and visibly shuffle the cards).
 pub fn airplay_devices() -> Vec<Device> {
-    AIRPLAY.lock().unwrap().values().cloned().collect()
+    let mut v: Vec<Device> = AIRPLAY.lock().unwrap().values().cloned().collect();
+    v.sort_by(|a, b| a.name.cmp(&b.name));
+    v
 }
 
+/// Sorted by name for the same reason as `airplay_devices`.
 pub fn raop_targets() -> Vec<Target> {
-    RAOP.lock().unwrap().values().cloned().collect()
+    let mut v: Vec<Target> = RAOP.lock().unwrap().values().cloned().collect();
+    // RAOP is keyed by "MAC@name", not the prettified name, so two speakers
+    // sharing a friendly name would otherwise tie non-deterministically.
+    v.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.addr.cmp(&b.addr)));
+    v
 }
 
 /// Begin browsing. Spawns background threads that live for the app's lifetime.
@@ -102,22 +114,35 @@ pub fn start() -> anyhow::Result<()> {
     let raop_rx = mdns.browse("_raop._tcp.local.")?;
     std::thread::spawn(move || {
         while let Ok(event) = raop_rx.recv() {
-            if let ServiceEvent::ServiceResolved(info) = event {
-                let raw = clean_name(info.get_fullname());
-                let addr = info
-                    .get_addresses()
-                    .iter()
-                    .next()
-                    .map(|a| a.to_string())
-                    .unwrap_or_default();
-                let target = Target {
-                    name: pretty_raop(&raw),
-                    meta: "AirPlay audio · RAOP".into(),
-                    on: false,
-                    vol: 50,
-                    addr,
-                };
-                RAOP.lock().unwrap().insert(raw, target);
+            match event {
+                ServiceEvent::ServiceResolved(info) => {
+                    let raw = clean_name(info.get_fullname());
+                    let addr = info
+                        .get_addresses()
+                        .iter()
+                        .next()
+                        .map(|a| a.to_string())
+                        .unwrap_or_default();
+                    let target = Target {
+                        name: pretty_raop(&raw),
+                        meta: "AirPlay audio · RAOP".into(),
+                        on: false,
+                        vol: 50,
+                        addr,
+                    };
+                    RAOP.lock().unwrap().insert(raw, target);
+                }
+                ServiceEvent::ServiceRemoved(_, fullname) => {
+                    // Mirrors the AirPlay arm above. Without this the map only
+                    // ever grew: on a laptop that roams networks, speakers from
+                    // the office stayed listed as castable all session, and
+                    // `list_airplay_targets` (polled every 8 s) cloned the whole
+                    // accumulated set each time. `Target` has no reachability
+                    // flag to flip the way `Device.online` does — `on` means
+                    // "currently casting to it" — so drop the entry outright.
+                    RAOP.lock().unwrap().remove(&clean_name(&fullname));
+                }
+                _ => {}
             }
         }
     });

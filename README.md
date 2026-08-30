@@ -15,6 +15,19 @@ A Windows 11 bridge for Apple's wireless sharing ecosystem, wrapped in a visionO
 - **Zero-setup start** — the receiver auto-starts with the app. Launch `Mirr.exe`, pick **Mirr** in the iOS Screen Mirroring sheet, done. No launcher scripts needed.
 - **Liquid Glass UI** — frameless window with acrylic/mica, custom window controls, aurora backdrop, specular glass surfaces. Backdrop blur is limited to the three large surfaces; inner cards are lightweight translucent tiles, and ambient animation pauses while mirroring or hidden.
 
+## Performance
+
+The ambient background (`.bg` in `src/styles.css`) must stay a **static** layered radial-gradient — do not reintroduce animated, blurred orb divs behind it. An earlier version had four `.orb` divs (30-52vw, `filter:blur(85px)`, `mix-blend-mode:screen`, infinite transform animation with `scale()`); re-rasterizing that much blur every frame forced the three `backdrop-filter` glass surfaces to re-blur and DWM to recomposite the acrylic window, which measured 92% GPU at idle. Painting the same aurora as static layered radial-gradients (no filter, no blend mode, no animation) fixed it.
+
+That wasn't the whole story, though — once the orbs were gone, the app still measured 53-72% GPU (plus ~18% DWM) whenever the window was open and focused. The remaining cause was the three `.radar` rings and the `.dot.pulse` status dot, the only things still animating while waiting for a device: on a transparent + acrylic window, every frame the page submits forces DWM to re-blur the whole backdrop, so even a tiny animation is expensive. Stepping the frame rate down confirmed it's the *presence* of an active animation, not its frame count, that matters:
+
+- smooth 60 fps — 53-72% GPU, ~18% DWM
+- `steps(14)`, ~5 fps — ~13% GPU
+- `steps(7)`, ~2.5 fps — ~8% GPU
+- animation stopped outright — 0.0% GPU, ~2.5% DWM
+
+So the fix has two parts: the radar/pulse animations now use `steps()`, costing ~8% instead of 53-72% while you're actively using the app, and a `calm` body class (12 s of no pointer/keyboard activity, in `src/app.js`) sets `animation:none` — not `animation-play-state:paused`, which would freeze the rings mid-expansion and look like a hung app — so an unattended window drops to 0%. Any input, focus change, or engine-state change lifts `calm` instantly, and animations are already stopped whenever the window is unfocused or hidden (`body.idlebg`). One methodology note: these numbers require the window to be genuinely *focused* — `SetForegroundWindow` is blocked for background processes on Windows, so an early "0%" reading turned out to be an unfocused window whose animations were already paused by `body.idlebg`, not a real fix.
+
 ## Requirements
 
 1. **Windows 11** (WebView2 preinstalled)
@@ -46,6 +59,8 @@ cd src-tauri; cargo build --release   # -> target/release/mirr.exe
 ```
 
 `scripts/setup-windows.ps1` automates the toolchain install + first run.
+
+> `src-tauri/build.rs` declares `cargo:rerun-if-changed` for `../src` and each frontend file. Without that, a frontend-only edit (`src/*.html`, `.css`, `.js`) was a silent cargo cache hit — `cargo build`/`npm run build` would happily ship the old embedded UI. If a change to `src/` still doesn't show up in a release build, check that `build.rs` still watches it.
 
 ## How the mirror docking works
 

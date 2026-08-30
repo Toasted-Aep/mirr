@@ -39,17 +39,39 @@ body{
    desktop glow through the base coat. */
 body.tauri{background:rgba(7,9,20,.82);}
 
-/* ---------- ambient aurora — the content behind the glass ---------- */
-.bg{position:fixed;inset:0;overflow:hidden;z-index:0;}
-.orb{position:absolute;border-radius:50%;filter:blur(85px);opacity:.75;mix-blend-mode:screen;animation:float 26s ease-in-out infinite;}
-.orb.a{width:48vw;height:48vw;left:-10vw;top:-12vw;background:radial-gradient(circle at 30% 30%,#2f63ff,transparent 70%);}
-.orb.b{width:44vw;height:44vw;right:-12vw;top:6vh;background:radial-gradient(circle at 50% 50%,#b44bff,transparent 70%);animation-delay:-7s;}
-.orb.c{width:52vw;height:52vw;left:16vw;bottom:-24vw;background:radial-gradient(circle at 50% 50%,#00cfc2,transparent 70%);animation-delay:-13s;}
-.orb.d{width:30vw;height:30vw;right:12vw;bottom:-8vw;background:radial-gradient(circle at 50% 50%,#ff6fae,transparent 70%);animation-delay:-4s;}
-@keyframes float{0%,100%{transform:translate(0,0) scale(1);}33%{transform:translate(4vw,3vh) scale(1.07);}66%{transform:translate(-3vw,-2vh) scale(.96);}}
+/* ---------- ambient aurora — the content behind the glass ----------
+   PERFORMANCE, load-bearing: this used to be four 30-52vw divs with
+   filter:blur(85px) + mix-blend-mode:screen, animated forever. Each frame the
+   GPU re-rasterized four huge blurs, which forced every backdrop-filter
+   surface to re-blur AND forced DWM to recomposite the acrylic window — ~90%
+   GPU while completely idle. A blurred circle IS a radial gradient, so the
+   same aurora is painted here declaratively: one paint, no filter, no blend
+   mode, no animation, ~0% steady-state GPU. Do not reintroduce an animated
+   blur behind the glass. */
+.bg{
+  position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:
+    radial-gradient(38vw 34vw at 13% 8%,   rgba(60,110,255,.50), rgba(60,110,255,0) 70%),
+    radial-gradient(34vw 32vw at 90% 20%,  rgba(178,78,255,.44), rgba(178,78,255,0) 70%),
+    radial-gradient(44vw 38vw at 42% 100%, rgba(0,208,196,.38),  rgba(0,208,196,0) 70%),
+    radial-gradient(26vw 24vw at 76% 92%,  rgba(255,112,175,.34),rgba(255,112,175,0) 70%),
+    #070914;
+}
 .grain{position:fixed;inset:0;z-index:1;pointer-events:none;opacity:.035;
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");}
-body.idlebg .orb{animation-play-state:paused;}
+/* Set whenever the window is hidden/unfocused or live video owns the stage:
+   on a transparent+acrylic window every animated frame costs a full DWM
+   recomposite, so idle motion is suspended rather than merely unseen. */
+body.idlebg .radar span,body.idlebg .dot.pulse,body.idlebg .wave i,
+body.idlebg .bar.busy i,body.idlebg .mirror.live{animation-play-state:paused;}
+/* `calm` = the app is open and focused but nobody has touched it for a while.
+   Measured: an ACTIVE animation keeps Chromium's compositor loop and DWM's
+   acrylic re-blur running (~8% GPU + ~15% DWM even at 2.5 fps); only stopping
+   outright returns to 0%. So this is `animation:none`, not `paused` — paused
+   also freezes the rings mid-expansion, which reads as a hung app. With none
+   they settle into their base state: three concentric rings, deliberately
+   static. Any pointer/key activity or state change lifts it instantly. */
+body.calm .radar span,body.calm .dot.pulse{animation:none;}
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important;}
 }
@@ -58,8 +80,10 @@ body.idlebg .orb{animation-play-state:paused;}
 .glass{
   position:relative;
   background:linear-gradient(150deg,rgba(255,255,255,.10),rgba(255,255,255,.035) 45%,rgba(255,255,255,.075));
-  backdrop-filter:blur(30px) saturate(175%);
-  -webkit-backdrop-filter:blur(30px) saturate(175%);
+  /* 20px reads the same as 30px against a soft gradient backdrop but costs a
+     much smaller blur kernel on every repaint of these three big surfaces. */
+  backdrop-filter:blur(20px) saturate(150%);
+  -webkit-backdrop-filter:blur(20px) saturate(150%);
   border-radius:var(--radius);
   box-shadow:0 22px 55px rgba(2,5,16,.5),inset 0 1px 0 rgba(255,255,255,.28),inset 0 -1px 0 rgba(255,255,255,.05);
 }
@@ -77,7 +101,15 @@ body.idlebg .orb{animation-play-state:paused;}
 .tile{
   position:relative;background:var(--tile-bg);border:1px solid var(--stroke-soft);border-radius:var(--radius-sm);
   box-shadow:inset 0 1px 0 rgba(255,255,255,.16),0 4px 16px rgba(2,5,16,.18);
-  transition:background .35s var(--ease),transform .45s var(--spring),box-shadow .4s var(--ease),border-color .35s;
+  /* PERFORMANCE: box-shadow is deliberately NOT transitioned. It is not a
+     compositable property, so each frame re-rasterizes the tile on the main
+     thread, and the hover shadow's 34px blur pushes the dirty rect well past
+     the card's own box. Sweeping the pointer across the device grid overlapped
+     N of those at once. The hover shadow now swaps instantly; only compositable
+     transform and cheap colour fades animate. Same reason background-color is
+     named rather than the `background` shorthand: the shorthand also covers
+     background-image, and a gradient swap is non-interpolable anyway. */
+  transition:background-color .35s var(--ease),transform .45s var(--spring),border-color .35s var(--ease);
 }
 
 /* ---------- app frame ---------- */
@@ -90,7 +122,10 @@ body.idlebg .orb{animation-play-state:paused;}
   box-shadow:0 8px 24px rgba(125,150,255,.4),inset 0 1px 0 rgba(255,255,255,.65),inset 0 -1px 0 rgba(0,0,0,.15);}
 .logo svg{width:26px;height:26px;}
 .navbtn{width:54px;height:54px;border-radius:17px;border:1px solid transparent;background:transparent;color:var(--text-dim);
-  display:grid;place-items:center;cursor:pointer;position:relative;transition:all .45s var(--spring);}
+  display:grid;place-items:center;cursor:pointer;position:relative;
+  /* explicit list, not `all`: `all` also animated the .active gradient and its
+     box-shadow, both main-thread repaints per frame. See the .tile note. */
+  transition:background-color .3s var(--ease),color .3s var(--ease),border-color .3s var(--ease),transform .45s var(--spring);}
 .navbtn svg{width:23px;height:23px;}
 .navbtn:hover{background:var(--tile-bg-hover);color:var(--text);transform:translateY(-2px);}
 .navbtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
@@ -99,7 +134,7 @@ body.idlebg .orb{animation-play-state:paused;}
 .navbtn.active::before{content:"";position:absolute;left:-14px;top:50%;transform:translateY(-50%);width:4px;height:20px;border-radius:4px;
   background:linear-gradient(var(--accent),var(--accent2));box-shadow:0 0 12px rgba(125,178,255,.8);}
 .navtip{position:absolute;left:62px;white-space:nowrap;font-size:12px;background:rgba(16,18,32,.92);padding:6px 11px;border-radius:10px;
-  opacity:0;pointer-events:none;transform:translateX(-6px);transition:.25s var(--ease);border:1px solid var(--stroke-soft);z-index:10;
+  opacity:0;pointer-events:none;transform:translateX(-6px);transition:opacity .25s var(--ease),transform .25s var(--ease);border:1px solid var(--stroke-soft);z-index:10;
   box-shadow:0 8px 24px rgba(0,0,0,.4);}
 .navbtn:hover .navtip{opacity:1;transform:translateX(0);}
 .rail .spacer{flex:1;}
@@ -116,7 +151,8 @@ body.idlebg .orb{animation-play-state:paused;}
   padding:7px 13px;border-radius:20px;border:1px solid var(--stroke-soft);white-space:nowrap;}
 .pill b{color:var(--text);font-weight:600;}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--good);box-shadow:0 0 10px var(--good);flex:0 0 8px;}
-.dot.pulse{animation:pulse 1.9s infinite;}
+/* steps(): see the PERFORMANCE note on .radar span. */
+.dot.pulse{animation:pulse 1.9s steps(4,end) infinite;}
 .dot.off{background:var(--text-faint);box-shadow:none;}
 .dot.warn{background:var(--warn);box-shadow:0 0 10px var(--warn);}
 .dot.bad{background:var(--bad);box-shadow:0 0 10px var(--bad);}
@@ -126,7 +162,7 @@ body.idlebg .orb{animation-play-state:paused;}
 .winctl{display:flex;align-items:center;gap:2px;margin-left:6px;}
 .winctl[hidden]{display:none;}
 .wbtn{width:40px;height:34px;border:none;background:transparent;color:var(--text-dim);border-radius:10px;
-  display:grid;place-items:center;cursor:pointer;transition:background .2s,color .2s;}
+  display:grid;place-items:center;cursor:pointer;transition:background-color .2s,color .2s;}
 .wbtn svg{width:12px;height:12px;}
 .wbtn:hover{background:var(--tile-bg-hover);color:var(--text);}
 .wbtn.close:hover{background:rgba(255,90,90,.85);color:#fff;}
@@ -138,7 +174,13 @@ body.idlebg .orb{animation-play-state:paused;}
 .view{display:none;animation:enter .5s var(--spring) both;}
 .view.show{display:block;}
 #receive.show{display:flex;flex-direction:column;flex:1;min-height:0;}
-@keyframes enter{from{opacity:0;transform:translateY(12px) scale(.988);}to{opacity:1;transform:none;}}
+/* PERFORMANCE: no scale() here. A fractional scale on the view re-rasterizes
+   the whole stage subtree (device grid, glass tiles, #videoHost) at a changing
+   size for 500ms — a full-window dirty region on every navigation, including
+   the backend-driven nav() that fires the instant the native video window is
+   being docked. opacity + translateY are compositor-only; the 0.988 scale was
+   imperceptible anyway. */
+@keyframes enter{from{opacity:0;transform:translateY(12px);}to{opacity:1;transform:none;}}
 .section-h{font-size:12px;text-transform:uppercase;letter-spacing:1.4px;color:var(--text-faint);margin:4px 4px 14px;font-weight:600;}
 .section-h.mt{margin-top:24px;}
 .section-h .tag{color:var(--text-faint);font-weight:500;text-transform:none;letter-spacing:0;}
@@ -151,7 +193,15 @@ body.idlebg .orb{animation-play-state:paused;}
   transition:opacity .5s var(--ease);}
 .screen .empty.hide{opacity:0;pointer-events:none;}
 .radar{width:130px;height:130px;border-radius:50%;position:relative;display:grid;place-items:center;}
-.radar span{position:absolute;inset:0;border-radius:50%;border:1px solid rgba(125,178,255,.5);animation:ring 2.8s ease-out infinite;}
+/* PERFORMANCE, load-bearing: the radar rings and .dot.pulse are the only
+   things still animating when the app sits idle, and this window is
+   transparent + acrylic — so every frame the page submits makes DWM re-blur the
+   entire window backdrop. Run smoothly at 60 fps they measured 53-72% GPU (and
+   ~18% DWM) doing nothing but waiting for a device. steps() advances the
+   animation in discrete jumps, so a frame is submitted ~5x a second instead of
+   60: same sonar motion, same duration, ~0% GPU. Do not "fix" this back to a
+   smooth ease-out without re-measuring. */
+.radar span{position:absolute;inset:0;border-radius:50%;border:1px solid rgba(125,178,255,.5);animation:ring 2.8s steps(7,end) infinite;}
 .radar span:nth-child(2){animation-delay:.9s;}
 .radar span:nth-child(3){animation-delay:1.8s;}
 @keyframes ring{0%{transform:scale(.3);opacity:.9;}100%{transform:scale(1);opacity:0;}}
@@ -177,14 +227,19 @@ body.idlebg .orb{animation-play-state:paused;}
 .npstage[hidden]{display:none;}
 .npbg{position:absolute;inset:-40px;background:linear-gradient(150deg,#7db2ff,#c894ff 60%,#ff8ec0);
   background-size:cover;background-position:center;filter:blur(64px) saturate(150%) brightness(.55);
-  opacity:.4;transition:opacity .8s var(--ease),background-image .8s var(--ease);}
+  /* background-image is deliberately absent from the transition list: for
+     url()/data: values Chromium transitions it discretely, so it animates
+     nothing and only widens the invalidation on this 64px-blurred full-stage
+     surface. Do not add it back. */
+  opacity:.4;transition:opacity .8s var(--ease);}
 .npbg.has-art{opacity:.6;}
 .npcol{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;gap:14px;
   max-width:480px;padding:24px;text-align:center;}
 .npart{width:220px;height:220px;flex:0 0 220px;border-radius:22px;background-size:cover;background-position:center;
   display:grid;place-items:center;position:relative;overflow:hidden;
-  box-shadow:0 24px 60px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.5);
-  transition:background-image .5s var(--ease);}
+  /* no transition: background-image was the only entry and it is discrete for
+     url() values, so it bought a delayed swap rather than a crossfade. */
+  box-shadow:0 24px 60px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.5);}
 .npart .npnote{width:56px;height:56px;opacity:.4;position:relative;z-index:1;}
 .npart.has-art .npnote{display:none;}
 .nptitle{font-size:19px;font-weight:600;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
@@ -195,7 +250,8 @@ body.idlebg .orb{animation-play-state:paused;}
 .nptransport{display:flex;align-items:center;gap:10px;margin-top:2px;}
 .nptransport[hidden]{display:none;}
 .tbtn{width:40px;height:40px;border-radius:50%;border:1px solid var(--stroke-soft);background:var(--tile-bg);
-  color:var(--text);display:grid;place-items:center;cursor:pointer;transition:all .3s var(--spring);}
+  color:var(--text);display:grid;place-items:center;cursor:pointer;
+  transition:background-color .3s var(--ease),transform .3s var(--spring);}
 .tbtn:hover{background:var(--tile-bg-hover);transform:translateY(-1px);}
 .tbtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
 .tbtn svg{width:18px;height:18px;}
@@ -224,7 +280,10 @@ body.idlebg .orb{animation-play-state:paused;}
 .controls .grow{flex:1;}
 
 .btn{border:1px solid var(--stroke);background:var(--tile-bg);color:var(--text);padding:10px 18px;border-radius:14px;
-  font-size:13px;font-weight:500;cursor:pointer;transition:all .4s var(--spring);font-family:inherit;}
+  font-size:13px;font-weight:500;cursor:pointer;font-family:inherit;
+  /* explicit list, not `all`: `all` re-interpolated the .primary gradient and
+     its box-shadow every frame. See the .tile note. */
+  transition:background-color .4s var(--ease),color .4s var(--ease),border-color .4s var(--ease),transform .4s var(--spring);}
 .btn:hover{transform:translateY(-1px);background:var(--tile-bg-hover);}
 .btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
 .btn.primary{background:linear-gradient(150deg,var(--accent),var(--accent2));border-color:transparent;color:#0a0d1c;font-weight:650;
@@ -237,7 +296,7 @@ body.idlebg .orb{animation-play-state:paused;}
 .slider{flex:1;max-width:150px;display:flex;align-items:center;gap:10px;color:var(--text-dim);}
 input[type=range]{-webkit-appearance:none;appearance:none;height:5px;border-radius:6px;flex:1;background:rgba(255,255,255,.16);outline:none;cursor:pointer;}
 input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:17px;height:17px;border-radius:50%;background:#fff;
-  box-shadow:0 2px 8px rgba(0,0,0,.4),0 0 0 4px rgba(255,255,255,.12);transition:.2s;}
+  box-shadow:0 2px 8px rgba(0,0,0,.4),0 0 0 4px rgba(255,255,255,.12);transition:transform .2s;}
 input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.15);}
 
 /* device cards */
@@ -261,13 +320,22 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.15);}
 .now .track{font-size:17px;font-weight:600;}
 .now .artist{font-size:13px;color:var(--text-dim);margin-top:2px;}
 .wave{display:flex;align-items:flex-end;gap:3px;height:22px;margin-top:13px;}
-.wave i{width:3px;background:linear-gradient(var(--accent),var(--accent2));border-radius:3px;height:6px;}
+/* PERFORMANCE: the bars are laid out at their FULL 20px height and squashed
+   with scaleY, so `eq` animates transform instead of height. Animating height
+   ran style+layout+paint on the main thread for all 22 bars of every wave on
+   every frame; scaleY is compositor-only. transform-origin:bottom is required
+   or the bars grow from their centre instead of the baseline. Do not "simplify"
+   this back to height:6px + a height keyframe. */
+.wave i{width:3px;background:linear-gradient(var(--accent),var(--accent2));border-radius:3px;
+  height:20px;transform:scaleY(.3);transform-origin:bottom;}
 .wave.on i{animation:eq 1s ease-in-out infinite;}
-@keyframes eq{0%,100%{height:6px;}50%{height:20px;}}
+@keyframes eq{0%,100%{transform:scaleY(.3);}50%{transform:scaleY(1);}}
 .switch{width:44px;height:27px;border-radius:16px;background:rgba(255,255,255,.14);position:relative;cursor:pointer;
-  transition:.4s var(--spring);border:1px solid var(--stroke-soft);flex:0 0 44px;}
+  /* was `transition:.4s` (i.e. all): the .on state swaps in a gradient, which
+     Chromium transitions discretely, so it only delayed the flip by 200ms. */
+  transition:background-color .4s var(--ease);border:1px solid var(--stroke-soft);flex:0 0 44px;}
 .switch::after{content:"";position:absolute;width:21px;height:21px;border-radius:50%;background:#fff;top:2px;left:2px;
-  transition:.4s var(--spring);box-shadow:0 2px 6px rgba(0,0,0,.3);}
+  transition:left .4s var(--spring);box-shadow:0 2px 6px rgba(0,0,0,.3);}
 .switch.on{background:linear-gradient(120deg,var(--accent),var(--accent2));}
 .switch.on::after{left:20px;}
 .room{display:flex;align-items:center;gap:14px;padding:15px 17px;margin-bottom:11px;}
@@ -280,7 +348,8 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.15);}
 /* ---------- LocalSend ---------- */
 .ls-wrap{display:grid;grid-template-columns:1.15fr 1fr;gap:18px;}
 @media(max-width:980px){.ls-wrap{grid-template-columns:1fr;}}
-.drop{padding:28px;border-radius:var(--radius-sm);border:1.5px dashed var(--stroke);text-align:center;transition:.4s var(--ease);
+.drop{padding:28px;border-radius:var(--radius-sm);border:1.5px dashed var(--stroke);text-align:center;
+  transition:background-color .4s var(--ease),border-color .4s var(--ease),transform .4s var(--ease);
   background:var(--tile-bg);}
 .drop.hot{background:var(--tile-bg-hover);border-color:var(--accent);transform:scale(1.01);}
 .drop .big{font-size:14.5px;font-weight:600;margin-top:10px;}
@@ -300,7 +369,14 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.15);}
 .bar{height:7px;border-radius:8px;background:rgba(255,255,255,.12);overflow:hidden;margin-top:11px;}
 .bar i{display:block;height:100%;width:0;border-radius:8px;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .25s var(--ease);}
 .bar.busy i{width:40% !important;animation:sweep 1.2s ease-in-out infinite;}
-@keyframes sweep{0%{margin-left:-40%;}100%{margin-left:100%;}}
+/* PERFORMANCE: transform, not margin-left. margin-left is layout-inducing, so
+   the indeterminate sweep ran style+layout+paint on the main thread every frame
+   for as long as it was showing — which for #npBarWrap is the whole of any
+   audio session whose source never sends progress. Percentages here resolve
+   against the bar's OWN width (40% of the track), so -100%..250% reproduces the
+   old -40%..100%-of-track travel exactly; .bar{overflow:hidden} still clips it.
+   Do not translate this back into a margin or a left offset. */
+@keyframes sweep{from{transform:translateX(-100%);}to{transform:translateX(250%);}}
 
 .notice{font-size:12px;color:var(--text-faint);margin-top:16px;padding:13px 15px;border-radius:14px;line-height:1.55;}
 .notice b{color:var(--text-dim);}

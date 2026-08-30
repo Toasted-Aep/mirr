@@ -51,6 +51,16 @@ static TARGET: Mutex<Option<DockRect>> = Mutex::new(None);
 /// Last rect actually applied to the child, to avoid redundant Win32 calls.
 static APPLIED: Mutex<Option<DockRect>> = Mutex::new(None);
 static WATCHER_STARTED: AtomicBool = AtomicBool::new(false);
+/// Remaining fast watcher ticks: >0 means a mirror handshake is plausibly in
+/// flight, so keep sweeping for the video window 4x/s. Burned down one per tick.
+static SEEK_TICKS: AtomicU32 = AtomicU32::new(0);
+/// A `note_stream_stop` grace-period thread is already running.
+static STOP_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// How long (in fast ticks) one `connection request` keeps the watcher hot.
+/// 60 * 250 ms = 15 s, comfortably longer than the handshake-to-first-frame gap
+/// even on a slow network.
+const SEEK_FAST_TICKS: u32 = 60;
 
 pub fn set_engine_pid(pid: u32) {
     ENGINE_PID.store(pid, Ordering::SeqCst);
@@ -58,6 +68,17 @@ pub fn set_engine_pid(pid: u32) {
 
 pub fn mirror_active() -> bool {
     VIDEO_HWND.load(Ordering::SeqCst) != 0
+}
+
+/// The engine's log reader saw a connection request (or wants to cancel one):
+/// put the watcher on its fast cadence so a device's video window is docked
+/// within a fraction of a second of appearing.
+///
+/// This is only an accelerator, never a gate — the watcher still sweeps every
+/// second when it is false, so docking keeps working if UxPlay ever reworks the
+/// wording of that log line.
+pub fn set_seeking(seeking: bool) {
+    SEEK_TICKS.store(if seeking { SEEK_FAST_TICKS } else { 0 }, Ordering::SeqCst);
 }
 
 /// Frontend reports the stage rectangle; applied immediately when docked.
@@ -87,32 +108,46 @@ pub fn set_video_visible(visible: bool) {
 /// then close (or as a last resort hide) the window ourselves so the UI can
 /// return to the idle state.
 pub fn note_stream_stop(app: AppHandle) {
+    // One teardown prints several matching markers in a row ("teardown",
+    // "connection closed", "video renderer reset", ...), and both pipes are
+    // read by their own thread — unguarded, each line started its own ~2 s
+    // thread and they raced to close/hide the same HWND. At most one in flight.
+    if STOP_PENDING.swap(true, Ordering::SeqCst) {
+        return;
+    }
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(1200));
-        let hwnd = VIDEO_HWND.load(Ordering::SeqCst);
-        if hwnd == 0 {
-            return; // already gone — the watcher handled it
-        }
-        unsafe {
-            let h = HWND(hwnd as _);
-            if IsWindow(Some(h)).as_bool() {
-                let _ = PostMessageW(Some(h), WM_CLOSE, WPARAM(0), LPARAM(0));
-            }
-        }
-        std::thread::sleep(Duration::from_millis(800));
-        if VIDEO_HWND.load(Ordering::SeqCst) != hwnd {
-            return; // watcher noticed the close in the meantime
-        }
-        unsafe {
-            let h = HWND(hwnd as _);
-            if IsWindow(Some(h)).as_bool() {
-                let _ = ShowWindow(h, SW_HIDE); // frozen-frame window refuses to die
-            }
-        }
-        VIDEO_HWND.store(0, Ordering::SeqCst);
-        *APPLIED.lock().unwrap() = None;
-        let _ = app.emit("mirror://ended", ());
+        stop_after_grace(app);
+        // Single exit point: every early return inside stop_after_grace lands
+        // here, so the guard can never stick and swallow a later teardown.
+        STOP_PENDING.store(false, Ordering::SeqCst);
     });
+}
+
+fn stop_after_grace(app: AppHandle) {
+    std::thread::sleep(Duration::from_millis(1200));
+    let hwnd = VIDEO_HWND.load(Ordering::SeqCst);
+    if hwnd == 0 {
+        return; // already gone — the watcher handled it
+    }
+    unsafe {
+        let h = HWND(hwnd as _);
+        if IsWindow(Some(h)).as_bool() {
+            let _ = PostMessageW(Some(h), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+    }
+    std::thread::sleep(Duration::from_millis(800));
+    if VIDEO_HWND.load(Ordering::SeqCst) != hwnd {
+        return; // watcher noticed the close in the meantime
+    }
+    unsafe {
+        let h = HWND(hwnd as _);
+        if IsWindow(Some(h)).as_bool() {
+            let _ = ShowWindow(h, SW_HIDE); // frozen-frame window refuses to die
+        }
+    }
+    VIDEO_HWND.store(0, Ordering::SeqCst);
+    *APPLIED.lock().unwrap() = None;
+    let _ = app.emit("mirror://ended", ());
 }
 
 /// Spawn the background watcher (idempotent). It embeds the engine's video
@@ -122,7 +157,27 @@ pub fn ensure_watcher(app: AppHandle) {
         return;
     }
     std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_millis(250));
+        // Cadence is state-dependent. The undocked branch below is a full
+        // EnumWindows sweep of every top-level window on the desktop, and
+        // "open, nothing connected" is this app's steady state — polling that
+        // 4x/s forever is pure waste. Stay fast only when it buys something:
+        //   * docked      — the child rect must stay glued to the stage while
+        //                   the user drags/resizes the window;
+        //   * seeking     — a handshake is in flight (engines.rs saw a
+        //                   `connection request`), so the video window is about
+        //                   to appear and must dock immediately.
+        // Otherwise 1 s, which still bounds worst-case docking latency if the
+        // log marker is ever missed. Do NOT stop polling entirely: the marker
+        // is an accelerator, not the source of truth.
+        let fast = VIDEO_HWND.load(Ordering::SeqCst) != 0 || SEEK_TICKS.load(Ordering::SeqCst) > 0;
+        std::thread::sleep(Duration::from_millis(if fast { 250 } else { 1000 }));
+        let _ = SEEK_TICKS.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |t| {
+            if t > 0 {
+                Some(t - 1)
+            } else {
+                None // already idle — leave it alone
+            }
+        });
 
         let embedded = VIDEO_HWND.load(Ordering::SeqCst);
         if embedded != 0 {
@@ -254,6 +309,9 @@ fn embed(app: &AppHandle, child: HWND, rect: DockRect) -> anyhow::Result<()> {
     // Fresh window: forget whatever was applied to the previous session's
     // window so apply_rect can't dedupe against stale state.
     *APPLIED.lock().unwrap() = None;
+    // A new session is live: drop any leftover teardown guard from the previous
+    // one so this session's own stop markers are not swallowed.
+    STOP_PENDING.store(false, Ordering::SeqCst);
     apply_rect(child, rect);
     Ok(())
 }
@@ -277,16 +335,25 @@ fn apply_rect(child: HWND, rect: DockRect) {
     let off_y = rect.y - cy;
     unsafe {
         let _ = MoveWindow(child, cx, cy, cw, ch, true);
-        // Rounded corners to match the glass stage; the system takes ownership
-        // of the region handle after SetWindowRgn.
-        let rgn = CreateRoundRectRgn(
-            off_x,
-            off_y,
-            off_x + rect.w + 1,
-            off_y + rect.h + 1,
-            rect.radius * 2,
-            rect.radius * 2,
-        );
-        SetWindowRgn(child, Some(rgn), true);
+        if rect.radius == 0 && rect.zoom == 100 {
+            // Square corners, no zoom crop (theater mode): the window IS its
+            // own rectangle, so a region would only describe what the window
+            // already is — while denying the child DWM's unclipped fast path.
+            // None clears any region left by a previous rect. Do not "simplify"
+            // this back into an unconditional CreateRoundRectRgn.
+            SetWindowRgn(child, None, true);
+        } else {
+            // Rounded corners to match the glass stage; the system takes
+            // ownership of the region handle after SetWindowRgn.
+            let rgn = CreateRoundRectRgn(
+                off_x,
+                off_y,
+                off_x + rect.w + 1,
+                off_y + rect.h + 1,
+                rect.radius * 2,
+                rect.radius * 2,
+            );
+            SetWindowRgn(child, Some(rgn), true);
+        }
     }
 }

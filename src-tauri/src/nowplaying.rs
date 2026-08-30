@@ -62,9 +62,10 @@ const RESET_MD: &[u8] = b"no data\n\0";
 /// Dedupe sentinel for the 95-byte 1x1 placeholder PNG.
 const PLACEHOLDER_KEY: u64 = 95;
 
-/// Idempotent: spawn the -md/-ca poll thread (300 ms stat cadence, 80 ms
-/// debounce re-read — writes are non-atomic). Called by
-/// `engines::start_airplay_receiver` right after the engine spawns.
+/// Idempotent: spawn the -md/-ca poll thread (300 ms stat cadence while a
+/// session is active, 2 s while idle; 80 ms debounce re-read — writes are
+/// non-atomic). Called by `engines::start_airplay_receiver` right after the
+/// engine spawns.
 pub fn ensure_watcher(app: AppHandle) {
     if WATCHER_STARTED.swap(true, Ordering::SeqCst) {
         return; // already running for this process
@@ -77,7 +78,15 @@ pub fn ensure_watcher(app: AppHandle) {
         let mut md_sig: Option<(u128, u64)> = None;
         let mut ca_sig: Option<(u128, u64)> = None;
         loop {
-            std::thread::sleep(Duration::from_millis(300));
+            // Cadence from state, NOT a constant. This thread outlives the
+            // engine (there is no exit path), and both handle_md and handle_ca
+            // no-op unless the session is active — so at a constant 300 ms the
+            // idle app paid two stat syscalls 3.3x/second forever, for nothing,
+            // at a period short enough to defeat Windows timer coalescing.
+            // Fast while a real session is running (metadata must feel live),
+            // slow otherwise. Do not "simplify" this back to one interval.
+            let active = SESSION.lock().unwrap().active;
+            std::thread::sleep(Duration::from_millis(if active { 300 } else { 2000 }));
 
             let sig = file_sig(&md);
             if sig != md_sig {

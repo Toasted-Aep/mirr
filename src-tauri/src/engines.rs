@@ -327,13 +327,25 @@ fn spawn_log_reader(app: AppHandle, generation: u64, pipe: impl std::io::Read + 
                 emit_status(&app, "ready", "");
             } else if l.contains("connection request") {
                 emit_status(&app, "connecting", "");
+                // Also tell the window watcher a mirror handshake is in flight,
+                // so it polls for the engine's video window at the fast cadence
+                // instead of its slow idle one (see embed::set_seeking).
+                crate::embed::set_seeking(true);
             }
             if is_stream_stop_marker(&l) {
                 crate::embed::note_stream_stop(app.clone());
             }
             crate::nowplaying::on_log_line(&app, line);
             crate::dacp::on_log_line(&app, line);
-            let _ = app.emit("airplay://log", line.to_string());
+            // NOTE: there used to be an `app.emit("airplay://log", ...)` here.
+            // It was removed deliberately: no frontend code ever listened for
+            // it, and UxPlay/GStreamer are chatty on both pipes (an `audio
+            // progress` line ~1/s for a whole session), so every line paid a
+            // String clone + serde serialization + a cross-process wake of the
+            // WebView2 renderer for a payload nothing read. If a log console is
+            // ever added, reinstate it behind a debug flag (e.g. only emit when
+            // a `MIRR_LOG_CONSOLE` env var / setting is set) rather than
+            // unconditionally — the hot path must stay silent by default.
         }
         // EOF — the engine died or was stopped. Take the child under the lock
         // only if it is still our generation, but wait() OUTSIDE the lock so a

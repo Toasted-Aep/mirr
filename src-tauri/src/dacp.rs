@@ -9,6 +9,7 @@
 //!   dacp://state { available, discovering }
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -92,7 +93,8 @@ const ALLOWED: &[&str] = &[
 // Hooks (frozen signatures)
 // ----------------------------------------------------------------------------
 
-/// Idempotent: spawn the .dacp file poller (500 ms) and the long-lived
+/// Idempotent: spawn the .dacp file poller (500 ms with a live session, 2 s
+/// while the export file is absent) and the long-lived
 /// `_dacp._tcp` browse. Called by `engines::start_airplay_receiver`.
 pub fn ensure_watcher(app: AppHandle) {
     let _ = APP.set(app.clone());
@@ -179,23 +181,40 @@ pub async fn set_volume(pct: f32) -> Result<u16, String> {
 // ----------------------------------------------------------------------------
 
 fn spawn_file_poller(app: AppHandle) {
-    std::thread::spawn(move || loop {
-        poll_once(&app);
-        std::thread::sleep(Duration::from_millis(500));
+    // Hoisted: dacp_path() re-reads LOCALAPPDATA and rebuilds the same PathBuf
+    // on every tick, and the path is constant for the process lifetime.
+    let path = crate::engines::dacp_path();
+    std::thread::spawn(move || {
+        // Cadence from state, NOT a constant. `engines` deletes the export files
+        // on every stop and before every spawn, so the file's existence on the
+        // last tick is a local engine/session liveness signal that costs nothing
+        // extra (we just tried to open it) and needs no cross-module hook. Idle,
+        // a constant 500 ms meant a failing CreateFile twice a second forever.
+        // Don't flatten this back to one interval.
+        loop {
+            let live = poll_once(&app, &path);
+            std::thread::sleep(Duration::from_millis(if live { 500 } else { 2000 }));
+        }
     });
 }
 
-fn poll_once(app: &AppHandle) {
+/// One tick. Returns true when the file held a usable session — the poller
+/// picks its next sleep from that.
+fn poll_once(app: &AppHandle, path: &Path) -> bool {
     // read_to_string fails (missing file) => session gone.
-    let Some(text) = std::fs::read_to_string(crate::engines::dacp_path()).ok() else {
+    let Some(text) = std::fs::read_to_string(path).ok() else {
         clear_session(app);
-        return;
+        return false;
     };
-    // A present-but-unusable file (only one line, or no Active-Remote) is
-    // treated the same as absent: nothing to authenticate with.
+    // A present-but-unusable file (only one line, or no Active-Remote) has no
+    // session to authenticate with, but is NOT the same as absent: it can be a
+    // torn read of uxplay's two-line CRLF write caught mid-flight, which means
+    // the engine is actively writing to it, i.e. very much alive. Stay on the
+    // fast cadence so a torn read during session startup doesn't back off to
+    // 2 s and delay the transport buttons.
     let Some(new_session) = parse_dacp(&text) else {
         clear_session(app);
-        return;
+        return true;
     };
 
     let changed = {
@@ -215,6 +234,7 @@ fn poll_once(app: &AppHandle) {
         emit_state(app, false, true);
     }
     try_resolve(app);
+    true
 }
 
 /// Drop the current session/endpoint and mark the remote unavailable.

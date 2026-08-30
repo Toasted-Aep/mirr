@@ -41,8 +41,10 @@ static PEERS: Lazy<Mutex<HashMap<String, Peer>>> = Lazy::new(|| Mutex::new(HashM
 static SESSIONS: Lazy<Mutex<HashMap<String, Session>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static FINGERPRINT: Lazy<String> = Lazy::new(generate_fingerprint);
 
-/// What the UI sees.
-#[derive(Clone, Serialize, Debug)]
+/// What the UI sees. `PartialEq` is load-bearing: `register_peer` compares the
+/// incoming peer against the stored one so a re-announcement of unchanged data
+/// does not re-emit the whole list to the WebView.
+#[derive(Clone, Serialize, Debug, PartialEq)]
 pub struct Peer {
     pub alias: String,
     pub model: String,
@@ -81,8 +83,16 @@ pub fn device_alias() -> String {
     hostname().unwrap_or_else(|| "Mirr".to_string())
 }
 
+/// Sorted by alias: same HashMap-ordering rule as `discovery::airplay_devices`.
+/// `renderPeers` skips its rebuild when the JSON is unchanged, which only works
+/// if identical peer sets serialize identically.
 pub fn peers() -> Vec<Peer> {
-    PEERS.lock().unwrap().values().cloned().collect()
+    let mut v: Vec<Peer> = PEERS.lock().unwrap().values().cloned().collect();
+    // PEERS is keyed by fingerprint, not alias, so an alias tie (e.g. two
+    // devices both defaulting to "iPhone") would otherwise fall back to
+    // HashMap iteration order — break it deterministically.
+    v.sort_by(|a, b| a.alias.cmp(&b.alias).then_with(|| a.fingerprint.cmp(&b.fingerprint)));
+    v
 }
 
 /// Boot the LocalSend subsystem: store the app handle, then run the multicast
@@ -184,16 +194,40 @@ async fn run_multicast() -> anyhow::Result<()> {
 }
 
 fn register_peer(info: &DeviceInfo, ip: &str) {
-    let peer = Peer {
-        alias: info.alias.clone(),
-        model: info.device_model.clone().unwrap_or_default(),
-        kind: info.device_type.clone().unwrap_or_else(|| "generic".into()),
-        ip: ip.to_string(),
-        port: info.port,
-        fingerprint: info.fingerprint.clone(),
+    let changed = {
+        let mut peers = PEERS.lock().unwrap();
+        let prev = peers.get(&info.fingerprint);
+        // `register_handler` has no source address and passes "" — keep the ip
+        // we already learned from multicast rather than blanking it. Otherwise
+        // the same device flips between two values and every flip counts as a
+        // change, defeating the dedupe below.
+        let ip = if ip.is_empty() {
+            prev.map(|p| p.ip.clone()).unwrap_or_default()
+        } else {
+            ip.to_string()
+        };
+        let peer = Peer {
+            alias: info.alias.clone(),
+            model: info.device_model.clone().unwrap_or_default(),
+            kind: info.device_type.clone().unwrap_or_else(|| "generic".into()),
+            ip,
+            port: info.port,
+            fingerprint: info.fingerprint.clone(),
+        };
+        if prev == Some(&peer) {
+            false
+        } else {
+            peers.insert(info.fingerprint.clone(), peer);
+            true
+        }
     };
-    PEERS.lock().unwrap().insert(info.fingerprint.clone(), peer);
-    emit_peers();
+    // Emit ONLY on a real change. LocalSend devices re-announce every ~5 s, so
+    // an unconditional emit made every device on the LAN force a full peer-list
+    // DOM rebuild — a renderer wakeup rate set by other people's traffic, on a
+    // pane the user may never have opened.
+    if changed {
+        emit_peers();
+    }
 }
 
 fn emit_peers() {
