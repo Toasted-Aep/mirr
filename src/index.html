@@ -11,152 +11,277 @@
   <div class="bg"></div>
   <div class="grain"></div>
 
-  <div class="app">
-    <!-- Sidebar -->
-    <nav class="rail glass">
-      <div class="logo" title="Mirr">
-        <svg viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,.96)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M4 18V7l4.5 5L13 7v11"/><path d="M16.5 18V7L20 10.5"/>
-        </svg>
-      </div>
-      <button class="navbtn active" data-view="receive" aria-label="AirPlay Receive">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21l4-4 4 4Z" fill="currentColor" stroke="none"/></svg>
-        <span class="navtip">AirPlay · Receive</span>
-      </button>
-      <button class="navbtn" data-view="airplay2" aria-label="AirPlay 2 Audio">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 18V6l10-2v12"/><circle cx="6" cy="18" r="2.4"/><circle cx="16" cy="16" r="2.4"/></svg>
-        <span class="navtip">AirPlay 2 · Audio</span>
-      </button>
-      <button class="navbtn" data-view="cast" aria-label="AirCast">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 16a6 6 0 0 1 6 6M2 12a10 10 0 0 1 10 10"/><circle cx="3" cy="21" r="1.4" fill="currentColor"/><rect x="11" y="4" width="11" height="9" rx="2"/></svg>
-        <span class="navtip">AirCast · Send</span>
-      </button>
-      <button class="navbtn" data-view="localsend" aria-label="LocalSend">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 19V5M5 12l7-7 7 7"/><path d="M5 21h14"/></svg>
-        <span class="navtip">LocalSend · Transfer</span>
-      </button>
-      <div class="spacer"></div>
-      <button class="navbtn" data-view="settings" aria-label="Settings">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
-        <span class="navtip">Settings</span>
-      </button>
-    </nav>
-
-    <div class="main">
-      <header class="topbar glass" data-tauri-drag-region>
-        <div data-tauri-drag-region>
-          <h1 id="vtitle">AirPlay Receiver</h1>
-          <div class="sub" id="vsub">Your PC appears as “Mirr”</div>
+  <div class="app spatial-shell">
+    <!-- Top Spatial Bar (visionOS / macOS Sequoia Capsule + Window Controls) -->
+    <header class="topbar spatial-topbar glass" data-tauri-drag-region>
+      <div class="spatial-left">
+        <!-- Expandable Spatial Status Capsule (opens Network & Engine Diagnostics) -->
+        <div class="spatial-capsule pill clickable" id="discoPill" role="button" tabindex="0" aria-expanded="false" title="View network &amp; engine diagnostics">
+          <div class="capsule-logo" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,.96)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 18V7l4.5 5L13 7v11"/><path d="M16.5 18V7L20 10.5"/>
+            </svg>
+          </div>
+          <span class="dot off" id="discoDot"></span>
+          <span class="capsule-status" id="disco">Starting…</span>
+          <span class="capsule-sep"></span>
+          <span class="capsule-meta" id="spatialMetaBadge">D3D11 · :53317</span>
         </div>
-        <div class="right">
-          <div class="pill" id="discoPill"><span class="dot off" id="discoDot"></span> <span id="disco">Starting…</span></div>
-          <div class="winctl" id="winctl" hidden>
-            <button class="wbtn" id="wmin" aria-label="Minimize"><svg viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.2"><path d="M1 6h10"/></svg></button>
-            <button class="wbtn" id="wmax" aria-label="Maximize"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="1.5" y="1.5" width="9" height="9" rx="1.5"/></svg></button>
-            <button class="wbtn close" id="wclose" aria-label="Close"><svg viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.2"><path d="M2 2l8 8M10 2l-8 8"/></svg></button>
+
+        <!-- Network & Engine Diagnostics Popover (anchored under the capsule) -->
+        <div class="diag-pop tile" id="diagPopover" hidden>
+          <div class="diag-head">
+            <span>Network &amp; Pipeline</span>
+            <span class="feasbadge fb-yes" id="diagBadge">ONLINE</span>
+          </div>
+          <div class="diag-row"><span>Broadcast name</span><b id="diagName">Mirr</b></div>
+          <div class="diag-row"><span>LAN IPv4</span><b id="diagIp">Detecting…</b></div>
+          <div class="diag-row"><span>Video decode</span><b id="diagCodec">H.264 D3D11 · 60fps Low-Lat</b></div>
+          <div class="diag-row"><span>LocalSend port</span><b id="diagLsPort">53317 · HTTP/UDP</b></div>
+          <div class="diag-actions">
+            <button class="btn ghost sm" id="diagCopyIp" type="button">Copy IP</button>
+            <button class="btn sm" id="diagRestart" type="button">Restart receiver</button>
           </div>
         </div>
-      </header>
+      </div>
 
-      <section class="stage glass">
+      <!-- Center Drag Region with Active View Title & Subtitle -->
+      <div class="spatial-center" data-tauri-drag-region>
+        <h1 id="vtitle">AirPlay Receiver</h1>
+        <span class="center-dot" aria-hidden="true">·</span>
+        <div class="sub" id="vsub">Your PC appears as “Mirr”</div>
+      </div>
 
-        <!-- AIRPLAY RECEIVE -->
+      <!-- Right Action Cluster: Ecosystem Drawer, PiP, Window Controls -->
+      <div class="right">
+        <button class="drawer-btn tile" id="drawerToggleBtn" type="button" aria-expanded="false" title="Toggle Nearby Devices &amp; Transfers Drawer">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="4" width="18" height="16" rx="3"/><path d="M15 4v16"/>
+          </svg>
+          <span>Ecosystem</span>
+          <b class="drawer-badge" id="drawerCountBadge">0</b>
+        </button>
+
+        <button class="wbtn pipbtn" id="pipBtn" type="button" title="Compact Picture-in-Picture mode" aria-label="Compact PiP mode">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><rect x="8" y="7.5" width="5" height="4.5" rx="1" fill="currentColor" stroke="none"/></svg>
+        </button>
+
+        <div class="winctl" id="winctl" hidden>
+          <button class="wbtn" id="wmin" type="button" aria-label="Minimize"><svg viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.2"><path d="M1 6h10"/></svg></button>
+          <button class="wbtn" id="wmax" type="button" aria-label="Maximize"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="1.5" y="1.5" width="9" height="9" rx="1.5"/></svg></button>
+          <button class="wbtn close" id="wclose" type="button" aria-label="Close"><svg viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.2"><path d="M2 2l8 8M10 2l-8 8"/></svg></button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Full-Bleed Spatial Stage -->
+    <div class="main spatial-main">
+      <section class="stage spatial-stage glass">
+
+        <!-- AIRPLAY RECEIVE (Full-Bleed Spatial Canvas) -->
         <div class="view show" id="receive">
           <div class="screen">
             <!-- The native mirror video is docked exactly over this element -->
             <div id="videoHost"></div>
+
+            <!-- Spatial Idle Center Card -->
             <div class="empty" id="rxEmpty">
-              <div class="radar"><span></span><span></span><span></span>
-                <div class="core"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8"/></svg></div>
-              </div>
-              <div>
+              <div class="spatial-idle-card tile">
+                <div class="radar"><span></span><span></span><span></span>
+                  <div class="core">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9"><path d="M5 17H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-1"/><polygon points="12 15 17 21 7 21 12 15"/></svg>
+                  </div>
+                </div>
                 <div class="rx-title" id="rxTitle">Starting receiver…</div>
                 <div class="rx-sub" id="rxSub">One moment</div>
+                <div class="idle-pills">
+                  <span class="idle-chip">AirPlay Screen 60fps</span>
+                  <span class="idle-chip">Lossless Audio</span>
+                  <span class="idle-chip" id="idleDropChip" role="button" tabindex="0">Drop Files for LocalSend</span>
+                </div>
+                <button class="btn" id="rxRetry" type="button" hidden>Restart receiver</button>
               </div>
-              <button class="btn" id="rxRetry" hidden>Restart receiver</button>
             </div>
-            <div class="mirror" id="rxMirror"><div class="badge">📱 iPhone — demo mirror · 1080p60</div></div>
+
+            <div class="mirror" id="rxMirror"><div class="badge">📱 AirPlay Screen Mirror · 1080p60</div></div>
+
+            <!-- PiP expand button: bottom-right corner, borderless icon-only -->
+            <button class="pip-expand-btn" id="pipExitBtn" type="button" title="Restore full window" aria-label="Restore full window">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="15 3 21 3 21 9"/>
+                <polyline points="9 21 3 21 3 15"/>
+                <line x1="21" y1="3" x2="14" y2="10"/>
+                <line x1="3" y1="21" x2="10" y2="14"/>
+              </svg>
+            </button>
+            <span id="pipTitle" hidden></span>
+
+            <!-- Auto-hiding floating HUD pill in Theater mode -->
+            <div class="theater-hud" id="theaterHud">
+              <div class="th-transport" id="thTransport" hidden>
+                <button class="tbtn sm" id="thPrev" type="button" aria-label="Previous track">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M19 5v14L8 12l11-7Z"/><path d="M6 5v14"/></svg>
+                </button>
+                <button class="tbtn sm" id="thPlay" type="button" aria-label="Play or pause">
+                  <svg viewBox="0 0 24 24" fill="currentColor" id="thPlayIcon"><path d="M8 5v14l11-7Z"/></svg>
+                </button>
+                <button class="tbtn sm" id="thNext" type="button" aria-label="Next track">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5v14l11-7Z"/><path d="M18 5v14"/></svg>
+                </button>
+                <span class="th-sep"></span>
+              </div>
+              <button class="btn ghost zbtn" id="thZoomOut" type="button" aria-label="Zoom out">−</button>
+              <button class="zoomlbl" id="thZoomLbl" type="button" title="Reset zoom">100%</button>
+              <button class="btn ghost zbtn" id="thZoomIn" type="button" aria-label="Zoom in">+</button>
+              <span class="th-sep"></span>
+              <button class="btn ghost sm" id="thExit" type="button">✕ Exit Theater</button>
+            </div>
 
             <!-- Audio-only Now Playing stage: sibling of #videoHost/#rxEmpty, shown
                  when an audio-only AirPlay session is active and mirroring is not. -->
             <div class="npstage" id="npStage" hidden>
               <div class="npbg" id="npBg"></div>
-              <div class="npcol">
-                <div class="npart albumart" id="npArt">
-                  <svg class="npnote" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6l10-2v12"/><circle cx="6" cy="18" r="2.4"/><circle cx="16" cy="16" r="2.4"/></svg>
-                </div>
-                <div class="nptitle" id="npTitle">Audio from your device</div>
-                <div class="npartist" id="npArtist">Waiting for track info…</div>
-                <div class="npprog">
-                  <span class="nptime" id="npElapsed">–:––</span>
-                  <div class="bar busy" id="npBarWrap"><i id="npBar"></i></div>
-                  <span class="nptime" id="npRemain">–:––</span>
-                </div>
-                <div class="nptransport" id="npTransport" hidden>
-                  <button class="tbtn" id="npPrev" aria-label="Previous track">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M19 5v14L8 12l11-7Z"/><path d="M6 5v14"/></svg>
-                  </button>
-                  <button class="tplay" id="npPlay" aria-label="Play or pause">
-                    <svg viewBox="0 0 24 24" fill="currentColor" id="npPlayIcon"><path d="M8 5v14l11-7Z"/></svg>
-                  </button>
-                  <button class="tbtn" id="npNext" aria-label="Next track">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5v14l11-7Z"/><path d="M18 5v14"/></svg>
-                  </button>
-                  <div class="npvol">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 5V4L8 9Z"/></svg>
-                    <input type="range" min="0" max="100" value="70" id="npVol" aria-label="Volume">
+              <div class="npcol tile" id="npCol">
+                <div class="npart" id="npArt" data-tauri-drag-region>
+                  <img class="npart-img" id="npArtImg" alt="" hidden data-tauri-drag-region />
+                  <div class="npart-placeholder" id="npArtPlaceholder" data-tauri-drag-region>
+                    <svg class="npnote" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" data-tauri-drag-region><path d="M9 18V6l10-2v12"/><circle cx="6" cy="18" r="2.4"/><circle cx="16" cy="16" r="2.4"/></svg>
                   </div>
                 </div>
-                <div class="wave" id="npWave"></div>
+                <div class="np-overlay" id="npOverlay">
+                  <div class="np-meta-wrap" id="npMetaWrap">
+                    <div class="np-meta-scroll" id="npMetaScroll">
+                      <div class="nptitle" id="npTitle">Audio from your device</div>
+                      <div class="npalbum" id="npAlbum" hidden></div>
+                      <div class="npartist" id="npArtist">Waiting for track info…</div>
+                    </div>
+                  </div>
+                  <div class="npprog" id="npProg">
+                    <span class="nptime" id="npElapsed">–:––</span>
+                    <div class="bar busy" id="npBarWrap"><i id="npBar"></i></div>
+                    <span class="nptime" id="npRemain">–:––</span>
+                  </div>
+                  <div class="nptransport" id="npTransport">
+                    <button class="tbtn" id="npPrev" type="button" aria-label="Previous track" title="Previous track">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M19 5v14L8 12l11-7Z"/><path d="M6 5v14"/></svg>
+                    </button>
+                    <button class="tplay" id="npPlay" type="button" aria-label="Play or pause" title="Play or pause">
+                      <svg viewBox="0 0 24 24" fill="currentColor" id="npPlayIcon"><path d="M8 5v14l11-7Z"/></svg>
+                    </button>
+                    <button class="tbtn" id="npNext" type="button" aria-label="Next track" title="Next track">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5v14l11-7Z"/><path d="M18 5v14"/></svg>
+                    </button>
+                    <div class="npvol" id="npVolWrap">
+                      <button class="npvol-btn" id="npVolBtn" type="button" title="Mute / Unmute" aria-label="Mute / Unmute">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" id="npVolIcon"><path d="M4 9v6h4l5 5V4L8 9Z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19 6a9 9 0 0 1 0 12"/></svg>
+                      </button>
+                      <input type="range" min="0" max="100" value="70" id="npVol" aria-label="Volume">
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
-          <div class="controls tile">
+
+          <!-- Spatial Session Control Bar -->
+          <div class="controls spatial-controls tile">
             <div class="title">Receive session<small id="rxState">Idle</small></div>
             <div class="grow"></div>
             <div class="mtransport" id="mTransport" hidden>
-              <button class="tbtn" id="mPrev" aria-label="Previous track">
+              <button class="tbtn" id="mPrev" type="button" aria-label="Previous track">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M19 5v14L8 12l11-7Z"/><path d="M6 5v14"/></svg>
               </button>
-              <button class="tbtn" id="mPlay" aria-label="Play or pause">
+              <button class="tbtn" id="mPlay" type="button" aria-label="Play or pause">
                 <svg viewBox="0 0 24 24" fill="currentColor" id="mPlayIcon"><path d="M8 5v14l11-7Z"/></svg>
               </button>
-              <button class="tbtn" id="mNext" aria-label="Next track">
+              <button class="tbtn" id="mNext" type="button" aria-label="Next track">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5v14l11-7Z"/><path d="M18 5v14"/></svg>
               </button>
-              <input type="range" min="0" max="100" value="70" id="mVol" aria-label="Volume">
+              <div class="npvol" id="mVolWrap">
+                <button class="npvol-btn" id="mVolBtn" type="button" title="Mute / Unmute" aria-label="Mute / Unmute">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" id="mVolIcon"><path d="M4 9v6h4l5 5V4L8 9Z"/><path d="M16 9a5 5 0 0 1 0 6"/></svg>
+                </button>
+                <input type="range" min="0" max="100" value="70" id="mVol" aria-label="Volume">
+              </div>
             </div>
             <div class="zoomctl" id="zoomCtl" hidden>
-              <button class="btn ghost zbtn" id="zoomOut" aria-label="Zoom out">−</button>
-              <button class="zoomlbl" id="zoomLbl" title="Reset zoom">100%</button>
-              <button class="btn ghost zbtn" id="zoomIn" aria-label="Zoom in">+</button>
+              <button class="btn ghost zbtn" id="zoomOut" type="button" aria-label="Zoom out">−</button>
+              <button class="zoomlbl" id="zoomLbl" type="button" title="Reset zoom">100%</button>
+              <button class="btn ghost zbtn" id="zoomIn" type="button" aria-label="Zoom in">+</button>
             </div>
-            <button class="btn ghost" id="theaterBtn" hidden>⤢ Theater</button>
-            <button class="btn ghost" id="npDemoBtn" hidden>Simulate audio stream</button>
-            <button class="btn primary" id="rxBtn">Simulate device connect</button>
+            <button class="btn ghost" id="theaterBtn" type="button" hidden>⤢ Theater</button>
+            <button class="btn ghost" id="npDemoBtn" type="button" hidden>Simulate audio stream</button>
+            <button class="btn primary" id="rxBtn" type="button">Simulate device connect</button>
           </div>
-          <div class="section-h mt">On your network <span class="tag" id="rxEngineTag"></span></div>
-          <div class="grid" id="rxDevices"></div>
+
+          <div class="section-h mt" id="rxDevicesHeader">On your network <span class="tag" id="rxEngineTag"></span></div>
+          <div class="grid" id="rxDevicesMain" data-alias="airplayDevices"></div>
         </div>
 
-        <!-- AIRPLAY 2 (audio receive: lossless / multi-room) -->
-        <div class="view" id="airplay2">
+        <!-- AIRPLAY 2 (audio receive: lossless buffered audio) -->
+        <div class="view spatial-pane" id="airplay2">
           <div class="now tile">
-            <div class="albumart"></div>
+            <div class="albumart" id="a2art"></div>
             <div class="info">
               <div class="track" id="a2track">Nothing playing</div>
-              <div class="artist" id="a2sub">Waiting for an AirPlay 2 source · lossless ALAC up to 24-bit/48 kHz</div>
+              <div class="artist" id="a2sub">Waiting for an AirPlay 2 source · 44.1 kHz 16-bit PCM</div>
               <div class="wave" id="a2wave"></div>
+              <div class="a2-progress-row" style="margin-top:14px; display:flex; align-items:center; gap:12px;">
+                <span id="a2elapsed" style="font-size:12px; color:var(--text-dim); min-width:35px; font-variant-numeric:tabular-nums;">0:00</span>
+                <div class="bar" style="flex:1; height:4px; background:rgba(255,255,255,0.12); border-radius:2px; overflow:hidden; position:relative;">
+                  <i id="a2bar" style="display:block; height:100%; width:0%; background:var(--accent); border-radius:2px; transition:width 0.2s linear;"></i>
+                </div>
+                <span id="a2duration" style="font-size:12px; color:var(--text-dim); min-width:35px; font-variant-numeric:tabular-nums;">0:00</span>
+              </div>
+              <div class="a2-controls-row" style="margin-top:12px; display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+                <div class="a2-transport" style="display:flex; align-items:center; gap:8px;">
+                  <button class="tbtn sm" id="a2Prev" type="button" aria-label="Previous track" title="Previous track">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M19 5v14L8 12l11-7Z"/><path d="M6 5v14"/></svg>
+                  </button>
+                  <button class="tplay sm" id="a2Play" type="button" aria-label="Play or pause" title="Play or pause">
+                    <svg viewBox="0 0 24 24" fill="currentColor" id="a2PlayIcon"><path d="M8 5v14l11-7Z"/></svg>
+                  </button>
+                  <button class="tbtn sm" id="a2Next" type="button" aria-label="Next track" title="Next track">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5v14l11-7Z"/><path d="M18 5v14"/></svg>
+                  </button>
+                </div>
+                <div class="npvol" id="a2VolWrap" style="display:flex; align-items:center; gap:8px;">
+                  <button class="npvol-btn" id="a2VolBtn" type="button" title="Mute / Unmute" aria-label="Mute / Unmute">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" id="a2VolIcon"><path d="M4 9v6h4l5 5V4L8 9Z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19 6a9 9 0 0 1 0 12"/></svg>
+                  </button>
+                  <input type="range" min="0" max="100" value="70" id="a2Vol" aria-label="AirPlay 2 Volume" style="width:90px; accent-color:var(--accent);">
+                  <span id="a2vol" style="font-size:12px; font-weight:600; color:var(--text); min-width:35px; font-variant-numeric:tabular-nums;">70%</span>
+                </div>
+              </div>
+              <div style="display:flex; align-items:center; justify-content:space-between; margin-top:10px;">
+                <div class="tag good" id="a2status">Ready · Mirr Audio</div>
+              </div>
             </div>
-            <button class="btn primary" id="a2btn">Simulate stream</button>
+            <button class="btn primary" id="a2btn" type="button">Stop AirPlay 2</button>
           </div>
-          <div class="section-h">Multi-room group</div>
-          <div id="a2rooms"></div>
-          <div class="notice warn"><b>Honest scope:</b> the open AirPlay-2 receiver engine (<code>shairport-sync</code>) is Linux/BSD-only. On Windows this ships via a bundled engine sidecar; treat lossless multi-room <b>receive</b> as a stretch goal. AirPlay-1 audio receive works today.</div>
+          <div class="section-h">AirPlay 2 Session Information</div>
+          <div class="grid" id="a2infoGrid">
+            <div class="tile" style="padding:14px 18px;">
+              <div style="font-size:12px; color:var(--text-dim); margin-bottom:4px;">Stream Protocol</div>
+              <div style="font-weight:600;">AirPlay 2 Buffered Audio</div>
+              <div style="font-size:11px; color:var(--text-dim); margin-top:2px;">ChaCha20-Poly1305 Decryption</div>
+            </div>
+            <div class="tile" style="padding:14px 18px;">
+              <div style="font-size:12px; color:var(--text-dim); margin-bottom:4px;">Audio Format</div>
+              <div style="font-weight:600;">44.1 kHz · 16-bit Stereo</div>
+              <div style="font-size:11px; color:var(--text-dim); margin-top:2px;">Direct WASAPI Output</div>
+            </div>
+            <div class="tile" style="padding:14px 18px;">
+              <div style="font-size:12px; color:var(--text-dim); margin-bottom:4px;">mDNS Service</div>
+              <div style="font-weight:600;" id="a2mdnsName">Mirr Audio</div>
+              <div style="font-size:11px; color:var(--text-dim); margin-top:2px;">_airplay._tcp on Port 7000</div>
+            </div>
+          </div>
+          <div class="notice good"><b>Native AirPlay 2 Engine Active:</b> Mirr embeds the <code>openairplay2</code> pure Rust receiver on port 7000 while keeping UxPlay active for Screen Mirroring on port 7100. Senders can stream high-fidelity lossless music from Apple Music, Podcasts, or any iOS/macOS audio app directly to Windows.</div>
         </div>
 
         <!-- AIRCAST (send PC audio to speakers) -->
-        <div class="view" id="cast">
+        <div class="view spatial-pane" id="cast">
           <div class="now tile">
             <div class="albumart"></div>
             <div class="info">
@@ -164,7 +289,7 @@
               <div class="artist">Captured via WASAPI loopback → streamed over RAOP</div>
               <div class="wave" id="castwave"></div>
             </div>
-            <button class="btn" id="castPlay">▶ Stream</button>
+            <button class="btn" id="castPlay" type="button">▶ Stream</button>
           </div>
           <div class="section-h">Cast to AirPlay speakers on your network</div>
           <div id="rooms"></div>
@@ -172,8 +297,11 @@
         </div>
 
         <!-- LOCALSEND -->
-        <div class="view" id="localsend">
-          <div class="section-h">Nearby devices <span class="tag" id="lsScan">· scanning…</span></div>
+        <div class="view spatial-pane" id="localsend">
+          <div class="section-row">
+            <div class="section-h" style="margin-bottom:0">Nearby devices <span class="tag" id="lsScan">· scanning…</span></div>
+            <button class="btn ghost sm" id="lsOpenFolder" type="button">Open Downloads\Mirr</button>
+          </div>
           <div class="ls-wrap">
             <div>
               <div class="peerlist" id="lsPeers"></div>
@@ -189,26 +317,385 @@
                 <div class="bar" id="tfBarWrap"><i id="tfBar"></i></div>
                 <div class="small" id="tfPct" style="font-size:12px;color:var(--text-dim);margin-top:8px">Sending…</div>
               </div>
+              <div class="ls-history" id="lsHistoryWrap" hidden>
+                <div class="section-h mt" style="margin-top:16px;margin-bottom:8px">Recent transfers</div>
+                <div class="peerlist" id="lsHistory"></div>
+              </div>
               <div class="notice good"><b>LocalSend</b> is a real, cross-platform, MIT-licensed protocol: UDP multicast discovery on 224.0.0.167:53317 + an HTTP file API. Received files land in <b>Downloads\Mirr</b>. The other device just needs the LocalSend app.</div>
             </div>
           </div>
         </div>
 
         <!-- SETTINGS -->
-        <div class="view" id="settings">
-          <div class="section-h">Identity</div>
-          <div class="srow tile"><div class="st"><div class="lab">AirPlay name</div><div class="desc">How this PC appears in the iOS Screen Mirroring sheet.</div></div><div class="val">Mirr</div></div>
-          <div class="srow tile"><div class="st"><div class="lab">LocalSend alias</div><div class="desc">How this PC appears to LocalSend devices.</div></div><div class="val" id="setName">Mirr</div></div>
+        <div class="view spatial-pane" id="settings">
+          <div class="section-h">Identity &amp; Broadcast</div>
+          <div class="srow tile">
+            <div class="st">
+              <div class="lab">AirPlay &amp; LocalSend name</div>
+              <div class="desc">How this PC appears in the iOS Screen Mirroring sheet and to LocalSend peers.</div>
+            </div>
+            <div class="sctl">
+              <input type="text" class="sinput" id="setBroadcastInput" value="Mirr" maxlength="32" aria-label="Broadcast name">
+              <button class="btn sm" id="setSaveName" type="button">Apply</button>
+            </div>
+          </div>
+          <div class="srow tile">
+            <div class="st">
+              <div class="lab">LocalSend host alias</div>
+              <div class="desc">Active alias advertised on UDP multicast :53317.</div>
+            </div>
+            <div class="val" id="setName">Mirr</div>
+          </div>
+
+          <div class="section-h mt">Appearance &amp; Atmosphere</div>
+          <div class="theme-grid" id="themeGrid">
+            <div class="theme-card active tile" data-theme="horizon" role="button" tabindex="0" title="Select Horizon Glow background">
+              <div class="theme-swatch theme-horizon">
+                <div class="theme-swatch-pill"></div>
+              </div>
+              <div class="theme-card-info">
+                <span class="theme-card-name">Horizon Glow</span>
+                <span class="theme-badge">Default</span>
+              </div>
+              <div class="theme-card-desc">Subtle teal horizon rising on deep black</div>
+            </div>
+
+            <div class="theme-card tile" data-theme="graphite" role="button" tabindex="0" title="Select Graphite background">
+              <div class="theme-swatch theme-graphite">
+                <div class="theme-swatch-pill"></div>
+              </div>
+              <div class="theme-card-info">
+                <span class="theme-card-name">Graphite</span>
+                <span class="theme-badge" style="background:rgba(255,255,255,.14);color:#fff">Pro</span>
+              </div>
+              <div class="theme-card-desc">Neutral slate dark with soft overhead key light</div>
+            </div>
+
+            <div class="theme-card tile" data-theme="ink" role="button" tabindex="0" title="Select Midnight Ink background">
+              <div class="theme-swatch theme-ink">
+                <div class="theme-swatch-pill"></div>
+              </div>
+              <div class="theme-card-info">
+                <span class="theme-card-name">Midnight Ink</span>
+              </div>
+              <div class="theme-card-desc">Deep single-tone navy fading into black</div>
+            </div>
+
+            <div class="theme-card tile" data-theme="espresso" role="button" tabindex="0" title="Select Warm Espresso background">
+              <div class="theme-swatch theme-espresso">
+                <div class="theme-swatch-pill"></div>
+              </div>
+              <div class="theme-card-info">
+                <span class="theme-card-name">Warm Espresso</span>
+              </div>
+              <div class="theme-card-desc">Warm charcoal with gentle amber illumination</div>
+            </div>
+
+            <div class="theme-card tile" data-theme="grid" role="button" tabindex="0" title="Select Blueprint Grid background">
+              <div class="theme-swatch theme-grid">
+                <div class="theme-swatch-pill"></div>
+              </div>
+              <div class="theme-card-info">
+                <span class="theme-card-name">Blueprint Grid</span>
+                <span class="theme-badge" style="background:rgba(124,196,255,.18);color:var(--accent)">Dot</span>
+              </div>
+              <div class="theme-card-desc">Fine technical dot matrix over dark slate</div>
+            </div>
+
+            <div class="theme-card tile" data-theme="acrylic" role="button" tabindex="0" title="Select Pure Acrylic background">
+              <div class="theme-swatch theme-acrylic">
+                <div class="theme-swatch-pill"></div>
+              </div>
+              <div class="theme-card-info">
+                <span class="theme-card-name">Pure Acrylic</span>
+                <span class="theme-badge" style="background:rgba(180,142,255,.18);color:var(--accent2)">Glass</span>
+              </div>
+              <div class="theme-card-desc">Minimal tint letting Windows desktop blur shine through</div>
+            </div>
+
+            <div class="theme-card tile" data-theme="aurora" role="button" tabindex="0" title="Select Aurora background">
+              <div class="theme-swatch theme-aurora">
+                <div class="theme-swatch-pill"></div>
+              </div>
+              <div class="theme-card-info">
+                <span class="theme-card-name">Aurora</span>
+                <span class="theme-badge" style="background:rgba(255,180,180,.18);color:#ffb4b4">Classic</span>
+              </div>
+              <div class="theme-card-desc">Multi-color ambient glow (blue/violet/teal/pink)</div>
+            </div>
+          </div>
+
+          <div class="section-h mt">Accent Style &amp; Colors</div>
+          <div class="accent-section tile">
+            <div class="accent-sub-title">Solid Colors (Copic Scale)</div>
+            <div class="accent-presets" id="accentColorPresets">
+              <button class="accent-chip active" type="button" data-type="color" data-val="#A470E0" title="Copic FV2 Fluorescent Violet (Default)">
+                <span class="chip-swatch" style="background:#A470E0;"></span>
+                <span class="chip-name">Copic FV2 · Violet</span>
+                <span class="chip-tag">Default</span>
+              </button>
+              <button class="accent-chip" type="button" data-type="color" data-val="#2BAAE2" title="Copic B04 Tahitian Blue">
+                <span class="chip-swatch" style="background:#2BAAE2;"></span>
+                <span class="chip-name">Copic B04 · Blue</span>
+              </button>
+              <button class="accent-chip" type="button" data-type="color" data-val="#33B367" title="Copic G05 Emerald Green">
+                <span class="chip-swatch" style="background:#33B367;"></span>
+                <span class="chip-name">Copic G05 · Emerald</span>
+              </button>
+              <button class="accent-chip" type="button" data-type="color" data-val="#F79433" title="Copic YR04 Chrome Orange">
+                <span class="chip-swatch" style="background:#F79433;"></span>
+                <span class="chip-name">Copic YR04 · Orange</span>
+              </button>
+              <button class="accent-chip" type="button" data-type="color" data-val="#E63956" title="Copic R29 Lipstick Red">
+                <span class="chip-swatch" style="background:#E63956;"></span>
+                <span class="chip-name">Copic R29 · Crimson</span>
+              </button>
+              <button class="accent-chip" type="button" data-type="color" data-val="#E85D9E" title="Copic RV06 Cerise Pink">
+                <span class="chip-swatch" style="background:#E85D9E;"></span>
+                <span class="chip-name">Copic RV06 · Pink</span>
+              </button>
+              <button class="accent-chip" type="button" data-type="color" data-val="#7E8BA0" title="Copic C3 Cool Slate">
+                <span class="chip-swatch" style="background:#7E8BA0;"></span>
+                <span class="chip-name">Copic C3 · Slate</span>
+              </button>
+            </div>
+
+            <div class="accent-sub-title mt">Gradient Styles</div>
+            <div class="accent-presets" id="accentGradientPresets">
+              <button class="accent-chip" type="button" data-type="gradient" data-val="linear-gradient(135deg, #A470E0, #6C5CE7)" title="Neon Violet Gradient">
+                <span class="chip-swatch" style="background:linear-gradient(135deg, #A470E0, #6C5CE7);"></span>
+                <span class="chip-name">Neon Violet</span>
+              </button>
+              <button class="accent-chip" type="button" data-type="gradient" data-val="linear-gradient(135deg, #FF6B6B, #FFA07A)" title="Sunset Flare">
+                <span class="chip-swatch" style="background:linear-gradient(135deg, #FF6B6B, #FFA07A);"></span>
+                <span class="chip-name">Sunset Flare</span>
+              </button>
+              <button class="accent-chip" type="button" data-type="gradient" data-val="linear-gradient(135deg, #00C6FF, #0072FF)" title="Ocean Horizon">
+                <span class="chip-swatch" style="background:linear-gradient(135deg, #00C6FF, #0072FF);"></span>
+                <span class="chip-name">Ocean Horizon</span>
+              </button>
+              <button class="accent-chip" type="button" data-type="gradient" data-val="linear-gradient(135deg, #11998E, #38EF7D)" title="Emerald Aurora">
+                <span class="chip-swatch" style="background:linear-gradient(135deg, #11998E, #38EF7D);"></span>
+                <span class="chip-name">Emerald Aurora</span>
+              </button>
+              <button class="accent-chip" type="button" data-type="gradient" data-val="linear-gradient(135deg, #8A2387, #E94057, #F27121)" title="Cosmic Flame">
+                <span class="chip-swatch" style="background:linear-gradient(135deg, #8A2387, #E94057, #F27121);"></span>
+                <span class="chip-name">Cosmic Flame</span>
+              </button>
+              <button class="accent-chip" type="button" data-type="gradient" data-val="linear-gradient(135deg, #A470E0, #00C6FF)" title="Electric Dream">
+                <span class="chip-swatch" style="background:linear-gradient(135deg, #A470E0, #00C6FF);"></span>
+                <span class="chip-name">Electric Dream</span>
+              </button>
+            </div>
+
+            <!-- Gradient Builder / Creator Tool -->
+            <div class="accent-builder-box" id="accentBuilder">
+              <div class="builder-header">
+                <div class="st">
+                  <div class="lab">Gradient &amp; Custom Color Creator</div>
+                  <div class="desc">Build custom linear gradients with color pickers, direction angles, and live preview.</div>
+                </div>
+                <button class="btn sm ghost" id="builderResetBtn" type="button">Reset to Copic FV2</button>
+              </div>
+
+              <div class="builder-body">
+                <!-- Live Preview Card -->
+                <div class="builder-preview-card">
+                  <div class="preview-label">Live Preview</div>
+                  <div class="preview-elements">
+                    <div class="preview-play" id="builderPreviewPlay">
+                      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7Z"/></svg>
+                    </div>
+                    <div class="preview-bar-wrap">
+                      <div class="preview-bar"><i id="builderPreviewBar"></i></div>
+                    </div>
+                    <div class="preview-wave" id="builderPreviewWave">
+                      <i></i><i></i><i></i><i></i><i></i>
+                    </div>
+                  </div>
+                  <div class="preview-css-code" id="builderCssCode">#A470E0</div>
+                </div>
+
+                <!-- Direction / Angle Control -->
+                <div class="builder-controls-row">
+                  <span class="builder-label">Direction:</span>
+                  <div class="builder-angle-wrap">
+                    <input type="range" min="0" max="360" value="135" id="builderAngleSlider" aria-label="Gradient angle">
+                    <span class="angle-val" id="builderAngleVal">135°</span>
+                  </div>
+                  <div class="angle-quick-btns">
+                    <button class="btn sm ghost" type="button" data-angle="90">90° →</button>
+                    <button class="btn sm ghost" type="button" data-angle="135">135° ↘</button>
+                    <button class="btn sm ghost" type="button" data-angle="180">180° ↓</button>
+                  </div>
+                </div>
+
+                <!-- Color Stops Control -->
+                <div class="builder-stops-wrap">
+                  <div class="builder-stops-head">
+                    <span class="builder-label">Color Stops:</span>
+                    <button class="btn sm ghost" id="builderAddStopBtn" type="button">+ Add Color Stop</button>
+                  </div>
+                  <div class="builder-stops-list" id="builderStopsList"></div>
+                </div>
+
+                <!-- Custom Solid Color Quick-Picker -->
+                <div class="builder-controls-row mt-sm">
+                  <span class="builder-label">Or Custom Solid:</span>
+                  <div class="custom-color-row">
+                    <input type="color" id="builderSolidColorInput" value="#A470E0" class="color-picker-input" aria-label="Custom solid color">
+                    <input type="text" id="builderSolidHexInput" value="#A470E0" class="color-hex-input" spellcheck="false" maxlength="9">
+                    <button class="btn sm" id="builderApplySolidBtn" type="button">Apply Solid Color</button>
+                  </div>
+                </div>
+
+                <div class="builder-footer">
+                  <button class="btn primary" id="builderApplyGradientBtn" type="button">Apply Gradient to Mirr</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="section-h mt">AirPlay Receiver Engine</div>
+          <div class="srow tile">
+            <div class="st">
+              <div class="lab">Receiver Mode</div>
+              <div class="desc">Select active AirPlay engines: Dual Mode (Screen mirroring on port 7100 + Lossless audio on port 7000), AirPlay 1 only, or AirPlay 2 only.</div>
+            </div>
+            <div class="seg" id="setReceiverModeGroup">
+              <button class="seg-btn active" type="button" data-mode="dual">Dual (Screen + Audio)</button>
+              <button class="seg-btn" type="button" data-mode="airplay1">AirPlay 1 Only</button>
+              <button class="seg-btn" type="button" data-mode="airplay2">AirPlay 2 Only</button>
+            </div>
+          </div>
+
+          <div class="section-h mt">Mirroring &amp; Window Behavior</div>
+          <div class="srow tile">
+            <div class="st">
+              <div class="lab">Stream profile</div>
+              <div class="desc">Choose low-latency 60 fps for interactive screen mirroring, AV-Sync for video playback, or 30 fps Eco.</div>
+            </div>
+            <div class="seg" id="setPresetGroup">
+              <button class="seg-btn active" type="button" data-preset="60-low">60 fps · Low Latency</button>
+              <button class="seg-btn" type="button" data-preset="60-sync">60 fps · AV-Sync</button>
+              <button class="seg-btn" type="button" data-preset="30-eco">30 fps · Eco</button>
+            </div>
+          </div>
+          <div class="srow tile">
+            <div class="st">
+              <div class="lab">Pin window on top while mirroring</div>
+              <div class="desc">Automatically keep Mirr above other windows when an iPhone or Mac connects.</div>
+            </div>
+            <div class="switch" id="setAlwaysOnTop" role="switch" tabindex="0" aria-checked="false"></div>
+          </div>
+          <div class="srow tile">
+            <div class="st">
+              <div class="lab">Auto-enter Theater mode on connect</div>
+              <div class="desc">Expand the mirror stream edge-to-edge as soon as video starts.</div>
+            </div>
+            <div class="switch" id="setAutoTheater" role="switch" tabindex="0" aria-checked="false"></div>
+          </div>
+          <div class="srow tile">
+            <div class="st">
+              <div class="lab">Show playback transport controls</div>
+              <div class="desc">Show Previous, Play/Pause, and Next buttons on Now Playing. Default is disabled on initial app setup until remote control is fully resolved.</div>
+            </div>
+            <div class="switch" id="setShowTransportControls" role="switch" tabindex="0" aria-checked="false"></div>
+          </div>
+
+          <div class="section-h mt">Sound Output</div>
+          <div class="srow tile">
+            <div class="st">
+              <div class="lab">Audio playback device</div>
+              <div class="desc">Select the audio device used for AirPlay sound output.</div>
+            </div>
+            <div class="sctl">
+              <select class="sselect" id="setAudioOutputSelect" aria-label="Audio playback device">
+                <option value="default">Windows Default</option>
+              </select>
+              <button class="btn sm ghost" id="setRefreshAudioBtn" type="button" title="Refresh available audio devices">↻</button>
+            </div>
+          </div>
+          <div class="srow tile">
+            <div class="st">
+              <div class="lab">Auto-switch to new sound output</div>
+              <div class="desc">Automatically change playback when Windows default sound output changes (e.g. connecting headphones).</div>
+            </div>
+            <div class="switch on" id="setAutoSwitchAudio" role="switch" tabindex="0" aria-checked="true"></div>
+          </div>
+
           <div class="section-h mt">Capabilities</div>
           <div class="srow tile"><div class="st"><div class="lab">AirPlay receive — screen + audio</div><div class="desc">UxPlay/GStreamer engine, supervised with a hidden console. Video docks straight into this window.</div></div><span class="feasbadge fb-yes">SHIPS NOW</span></div>
           <div class="srow tile"><div class="st"><div class="lab">LocalSend transfer</div><div class="desc">Native Rust implementation of the LocalSend v2 protocol. Cross-platform.</div></div><span class="feasbadge fb-yes">SHIPS NOW</span></div>
           <div class="srow tile"><div class="st"><div class="lab">AirCast — send audio to speakers</div><div class="desc">RAOP via pyatv sidecar. Classic AirPlay targets fully; AirPlay-2-only targets partial.</div></div><span class="feasbadge fb-part">ENGINE NOT BUNDLED</span></div>
-          <div class="srow tile"><div class="st"><div class="lab">AirPlay 2 audio receive (lossless / multi-room)</div><div class="desc">shairport-sync’s AirPlay-2 build is Linux-only — stretch goal on Windows.</div></div><span class="feasbadge fb-part">STRETCH</span></div>
+          <div class="srow tile"><div class="st"><div class="lab">AirPlay 2 audio receive (lossless buffered audio)</div><div class="desc">Native embedded openairplay2 engine with WASAPI low-latency output. Pure Rust, zero external dependencies.</div></div><span class="feasbadge fb-yes">SHIPS NOW</span></div>
           <div class="section-h mt">About</div>
-          <div class="srow tile"><div class="st"><div class="lab">Mirr</div><div class="desc">Windows 11 Apple wireless bridge · Tauri 2 (Rust + WebView2) · Liquid Glass UI<br>github.com/toasted-aep/mirr</div></div><div class="val" id="verTag">v1.0.0</div></div>
+          <div class="srow tile"><div class="st"><div class="lab">Mirr</div><div class="desc">Windows 11 Apple wireless bridge · Tauri 2 (Rust + WebView2) · Spatial Glass UI<br>github.com/toasted-aep/mirr</div></div><div class="val" id="verTag">v1.0.0</div></div>
         </div>
 
+        <!-- Slide-Over Spatial Ecosystem Drawer (Nearby Apple Devices + LocalSend Peers) -->
+        <aside class="spatial-drawer glass closed" id="spatialDrawer" data-alias="ecoDrawer" aria-label="Nearby Ecosystem Drawer">
+          <div class="drawer-head">
+            <div>
+              <div class="drawer-title">Nearby Ecosystem</div>
+              <div class="drawer-sub">On your network <span id="rxEngineTagDrawer"></span></div>
+            </div>
+            <button class="wbtn" id="drawerCloseBtn" type="button" aria-label="Close drawer">
+              <svg viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.3"><path d="M2 2l8 8M10 2l-8 8"/></svg>
+            </button>
+          </div>
+
+          <div class="drawer-body">
+            <div class="section-h">Apple AirPlay Devices</div>
+            <div class="drawer-grid" id="rxDevices" data-alias="ecoPeers"></div>
+
+            <div class="section-h mt">LocalSend Instant Share</div>
+            <div class="peerlist" id="drawerPeers" data-alias="discoPeers"></div>
+          </div>
+
+          <div class="drawer-foot">
+            <button class="btn ghost sm" id="drawerOpenFolder" type="button">Open Downloads\Mirr</button>
+            <button class="btn sm" id="drawerGoLocalSend" type="button">Full LocalSend →</button>
+          </div>
+        </aside>
+
       </section>
+    </div>
+
+    <!-- Bottom Floating Spatial Glass Dock (visionOS style) -->
+    <div class="spatial-dock-wrap">
+      <nav class="spatial-dock glass" aria-label="Primary Navigation">
+        <button class="navbtn dock-item active" type="button" data-view="receive">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21l4-4 4 4Z" fill="currentColor" stroke="none"/></svg>
+          <span>AirPlay Stage</span>
+        </button>
+        <button class="navbtn dock-item" type="button" data-view="airplay2">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 18V6l10-2v12"/><circle cx="6" cy="18" r="2.4"/><circle cx="16" cy="16" r="2.4"/></svg>
+          <span>Spatial Audio</span>
+        </button>
+        <button class="navbtn dock-item" type="button" data-view="cast">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 16a6 6 0 0 1 6 6M2 12a10 10 0 0 1 10 10"/><circle cx="3" cy="21" r="1.4" fill="currentColor"/><rect x="11" y="4" width="11" height="9" rx="2"/></svg>
+          <span>AirCast</span>
+        </button>
+        <button class="navbtn dock-item" type="button" data-view="localsend">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 19V5M5 12l7-7 7 7"/><path d="M5 21h14"/></svg>
+          <span>LocalSend</span>
+        </button>
+        <span class="dock-sep" aria-hidden="true"></span>
+        <button class="navbtn dock-item" type="button" data-view="settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+          <span>Settings</span>
+        </button>
+      </nav>
+    </div>
+  </div>
+
+  <!-- Global drag-and-drop overlay when dragging files from any tab -->
+  <div class="drop-overlay" id="dropOverlay">
+    <div class="drop-card tile">
+      <svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.7"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M5 20h14"/></svg>
+      <div class="big">Drop file to share with LocalSend</div>
+      <div class="small" id="dropOverlaySub">Release anywhere to send to your selected peer</div>
     </div>
   </div>
 

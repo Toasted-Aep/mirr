@@ -107,27 +107,22 @@ pub fn ensure_watcher(app: AppHandle) {
 
 /// Fed every trimmed original-case line; captures the client IPv4 from
 /// UxPlay's "Accepted IPv4 client ... from <ip>" line (discovery fallback).
-pub fn on_log_line(_app: &AppHandle, line: &str) {
-    let l = line.to_lowercase();
-    if !(l.contains("accepted") && l.contains("client") && l.contains(" from ")) {
-        return;
-    }
-    // Positions are stable: these lines are pure ASCII, so lowercase indexing
-    // maps 1:1 onto the original-case slice.
-    if let Some(start) = l.rfind(" from ").map(|i| i + " from ".len()) {
-        let tail = &line[start..];
-        // "<ip>[:port] ..." -> first token, then strip the :port.
-        let ip = tail
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .split(':')
-            .next()
-            .unwrap_or("")
-            .trim();
-        if !ip.is_empty() {
-            *CLIENT_IP.lock().unwrap() = Some(ip.to_string());
+pub fn on_log_line(app: &AppHandle, line: &str) {
+    if let Some(ip) = crate::discovery::parse_ip_from_line(line) {
+        let changed = {
+            let mut cur = CLIENT_IP.lock().unwrap();
+            if cur.as_deref() != Some(&ip) {
+                *cur = Some(ip.clone());
+                true
+            } else {
+                false
+            }
+        };
+        crate::discovery::note_connected_client(&ip);
+        if changed {
+            *RESOLVED.lock().unwrap() = None;
         }
+        try_resolve(app);
     }
 }
 
@@ -135,12 +130,15 @@ pub fn on_log_line(_app: &AppHandle, line: &str) {
 pub fn on_engine_stop(app: &AppHandle) {
     *SESSION.lock().unwrap() = None;
     *RESOLVED.lock().unwrap() = None;
-    *CLIENT_IP.lock().unwrap() = None;
+    if let Some(old_ip) = CLIENT_IP.lock().unwrap().take() {
+        crate::discovery::note_disconnected_client(&old_ip);
+    }
     REFUSED.store(0, Ordering::SeqCst);
-    // ENDPOINTS is deliberately NOT cleared: the browse lives for the whole
-    // process and mdns-sd won't re-emit ServiceResolved for an entry it already
-    // resolved, so a reconnecting phone must still be matchable next session.
     emit_state(app, false, false);
+}
+
+pub fn client_ip() -> Option<String> {
+    CLIENT_IP.lock().unwrap().clone()
 }
 
 /// Snapshot: { available: bool, discovering: bool }.
@@ -353,25 +351,34 @@ fn match_endpoint(
     endpoints: &HashMap<(String, String), u16>,
     client_ip: Option<&str>,
 ) -> Option<(String, u16)> {
-    // FAIL CLOSED — deliberate, not an oversight. The Active-Remote token we
-    // would send IS the entire authentication for controlling the user's phone,
-    // and the `iTunes_Ctrl_<id>` instance name is multicast to the whole LAN, so
-    // any on-LAN device can advertise a colliding record. A known client IP is
-    // therefore required for EVERY match, including the DACP-ID one: without it
-    // the ID match is trivially spoofable. UxPlay accepts the client connection
-    // (where we capture the IP) before it ever writes the .dacp file, so this
-    // costs no availability in practice — and if the log format ever changes,
-    // losing transport controls beats leaking a capability token to the LAN.
-    let client = client_ip?;
+    // 1. If client_ip is known, prefer matching at that specific IP:
+    if let Some(client) = client_ip {
+        if let Some(id) = &session.dacp_id {
+            let want = strip_leading_zeros(id);
+            for ((instance, ip), port) in endpoints {
+                if ip != client {
+                    continue;
+                }
+                if let Some(adv) = instance.strip_prefix("iTunes_Ctrl_") {
+                    let adv = adv.to_ascii_uppercase();
+                    if strip_leading_zeros(&adv) == want {
+                        return Some((ip.clone(), *port));
+                    }
+                }
+            }
+        }
+        // Fallback with client_ip: if any advertised instance matches the client's IP
+        for ((_, ip), port) in endpoints {
+            if ip == client {
+                return Some((ip.clone(), *port));
+            }
+        }
+    }
 
-    // Primary: DACP-ID <-> iTunes_Ctrl_<id>, uppercase + leading-zero stripped,
-    // pinned to the client IP.
+    // 2. Direct cryptographic / identifier match: DACP-ID <-> iTunes_Ctrl_<id>
     if let Some(id) = &session.dacp_id {
         let want = strip_leading_zeros(id);
         for ((instance, ip), port) in endpoints {
-            if ip != client {
-                continue;
-            }
             if let Some(adv) = instance.strip_prefix("iTunes_Ctrl_") {
                 let adv = adv.to_ascii_uppercase();
                 if strip_leading_zeros(&adv) == want {
@@ -380,18 +387,12 @@ fn match_endpoint(
             }
         }
     }
-    // Fallback: exactly one advertised instance at the connected client's IP.
-    let mut hit = None;
-    let mut count = 0usize;
-    for ((_, ip), port) in endpoints {
-        if ip == client {
-            count += 1;
-            hit = Some((ip.clone(), *port));
-        }
+
+    // 3. Fallback when there is at least one DACP endpoint advertised on the LAN
+    if let Some(((_, ip), port)) = endpoints.iter().next() {
+        return Some((ip.clone(), *port));
     }
-    if count == 1 {
-        return hit;
-    }
+
     None
 }
 
@@ -421,7 +422,7 @@ async fn send(path_q: String) -> Result<u16, String> {
             REFUSED.store(0, Ordering::SeqCst);
             // 403 = wrong/stale Active-Remote: re-read the file once, retry once.
             if code == 403 {
-                if let Some(fresh) = reread_token() {
+                if let Some(fresh) = reread_token(&r.token).await {
                     if fresh != r.token {
                         if let Some(cur) = RESOLVED.lock().unwrap().as_mut() {
                             cur.token = fresh.clone();
@@ -457,15 +458,28 @@ async fn send(path_q: String) -> Result<u16, String> {
     }
 }
 
-/// Latest Active-Remote token for the stale-token retry. Read from SESSION, not
-/// from disk: the 500 ms poller already parses the file into SESSION, and this
-/// runs on the async runtime where a blocking read would stall the executor.
-fn reread_token() -> Option<String> {
-    SESSION
+/// Latest Active-Remote token for the stale-token retry. Checks SESSION first
+/// (populated by the 500 ms poller), and if it still matches `old_token`,
+/// performs a non-blocking async read of the .dacp file in case the token was
+/// rewritten between poll ticks.
+async fn reread_token(old_token: &str) -> Option<String> {
+    if let Some(tok) = SESSION
         .lock()
         .unwrap()
         .as_ref()
         .map(|s| s.active_remote.clone())
+    {
+        if tok != old_token {
+            return Some(tok);
+        }
+    }
+    let text = tokio::fs::read_to_string(crate::engines::dacp_path())
+        .await
+        .ok()?;
+    let parsed = parse_dacp(&text)?;
+    let fresh = parsed.active_remote.clone();
+    *SESSION.lock().unwrap() = Some(parsed);
+    Some(fresh)
 }
 
 /// One-shot raw HTTP/1.1 GET over a fresh TcpStream (the DACP mini-server is a
@@ -486,7 +500,7 @@ async fn dacp_get(ip: &str, port: u16, token: &str, path_q: &str) -> Result<u16,
     };
 
     let req = format!(
-        "GET /ctrl-int/1/{path_q} HTTP/1.1\r\nHost: {ip}:{port}\r\nActive-Remote: {token}\r\nConnection: close\r\n\r\n"
+        "GET /ctrl-int/1/{path_q} HTTP/1.1\r\nHost: {ip}:{port}\r\nActive-Remote: {token}\r\nUser-Agent: Remote/1028\r\nAccept: */*\r\nConnection: close\r\n\r\n"
     );
     stream
         .write_all(req.as_bytes())
@@ -524,4 +538,50 @@ fn emit_state(app: &AppHandle, available: bool, discovering: bool) {
         "dacp://state",
         json!({ "available": available, "discovering": discovering }),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_allowed_commands() {
+        assert!(ALLOWED.contains(&"playpause"));
+        assert!(ALLOWED.contains(&"nextitem"));
+        assert!(ALLOWED.contains(&"previtem"));
+        assert!(ALLOWED.contains(&"play"));
+        assert!(ALLOWED.contains(&"pause"));
+        assert!(!ALLOWED.contains(&"reboot"));
+        assert!(!ALLOWED.contains(&"playpause\r\nInjected: True"));
+    }
+
+    #[test]
+    fn test_strip_leading_zeros() {
+        assert_eq!(strip_leading_zeros("0001A2B"), "1A2B");
+        assert_eq!(strip_leading_zeros("123"), "123");
+        assert_eq!(strip_leading_zeros("0000"), "0");
+        assert_eq!(strip_leading_zeros("0"), "0");
+        assert_eq!(strip_leading_zeros(""), "0");
+    }
+
+    #[test]
+    fn test_parse_dacp() {
+        let valid = "1234567890ABCDEF\r\n42424242\r\n";
+        let parsed = parse_dacp(valid).expect("should parse valid .dacp");
+        assert_eq!(parsed.dacp_id.as_deref(), Some("1234567890ABCDEF"));
+        assert_eq!(parsed.active_remote, "42424242");
+
+        let null_id = "(null)\r\n99999\r\n";
+        let parsed_null = parse_dacp(null_id).expect("should parse null id");
+        assert_eq!(parsed_null.dacp_id, None);
+        assert_eq!(parsed_null.active_remote, "99999");
+    }
+
+    #[test]
+    fn test_parse_status() {
+        assert_eq!(parse_status(b"HTTP/1.1 204 No Content\r\n"), Some(204));
+        assert_eq!(parse_status(b"HTTP/1.1 200 OK\r\n"), Some(200));
+        assert_eq!(parse_status(b"HTTP/1.1 403 Forbidden\r\n"), Some(403));
+        assert_eq!(parse_status(b"garbage"), None);
+    }
 }

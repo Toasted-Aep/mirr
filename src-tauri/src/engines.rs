@@ -33,6 +33,46 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Default install location of the winget UxPlay package (`leapbtw.uxplay`).
 const UXPLAY_INSTALL: &str = r"C:\Program Files (x86)\uxplay-windows\_internal";
 
+fn default_receiver_mode() -> String {
+    "dual".to_string()
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineConfig {
+    pub broadcast_name: String,
+    pub fps: u32,
+    pub vsync: bool,
+    pub always_on_top_mirror: bool,
+    pub auto_theater: bool,
+    pub audio_output_device: String,
+    pub auto_switch_audio_output: bool,
+    // REMINDER / USER REQUIREMENT: Default to false (disabled) on first setup
+    // until previous/next/play/pause DACP control issues are fully resolved.
+    #[serde(default)]
+    pub show_transport_controls: bool,
+    #[serde(default = "default_receiver_mode")]
+    pub receiver_mode: String,
+}
+
+impl Default for EngineConfig {
+    fn default() -> Self {
+        Self {
+            broadcast_name: "Mirr".to_string(),
+            fps: 60,
+            vsync: false,
+            always_on_top_mirror: false,
+            auto_theater: false,
+            audio_output_device: "default".to_string(),
+            auto_switch_audio_output: true,
+            // REMINDER: Transport controls are disabled by default on initial app setup
+            // until transport playback controls (previous, play/pause, next) are completely resolved.
+            show_transport_controls: false,
+            receiver_mode: "dual".to_string(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct Supervised {
     /// (child, generation) — the generation tag lets a stale log-reader thread
@@ -52,6 +92,30 @@ static GENERATION: AtomicU64 = AtomicU64::new(0);
 /// Last (state, detail) emitted — lets the frontend query the current state
 /// after it attaches its listeners (early events would otherwise be lost).
 static LAST_STATE: Mutex<(String, String)> = Mutex::new((String::new(), String::new()));
+static CONFIG: once_cell::sync::Lazy<Mutex<EngineConfig>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(EngineConfig::default()));
+
+pub fn get_config() -> EngineConfig {
+    CONFIG.lock().unwrap().clone()
+}
+
+pub fn set_config(mut cfg: EngineConfig) -> EngineConfig {
+    let trimmed = cfg.broadcast_name.trim().to_string();
+    cfg.broadcast_name = if trimmed.is_empty() {
+        "Mirr".to_string()
+    } else {
+        trimmed
+    };
+    cfg.fps = match cfg.fps {
+        30 => 30,
+        _ => 60,
+    };
+    if cfg.audio_output_device.trim().is_empty() {
+        cfg.audio_output_device = "default".to_string();
+    }
+    *CONFIG.lock().unwrap() = cfg.clone();
+    cfg
+}
 
 /// Kill-on-close Job Object shared by every engine child: if Mirr dies for any
 /// reason (including a crash), the OS reaps the engines with it.
@@ -202,7 +266,59 @@ pub fn receiver_state() -> serde_json::Value {
     json!({ "state": state, "detail": detail })
 }
 
-/// Start the AirPlay screen/audio receiver. Advertises this PC as "Mirr".
+pub fn diagnostics(app: &AppHandle) -> serde_json::Value {
+    let (state, detail) = LAST_STATE.lock().unwrap().clone();
+    let cfg = get_config();
+    let lan_ip = local_ip_address::local_ip()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|_| "127.0.0.1".to_string());
+    let (ux_found, ux_path, d3d11) = match resolve_uxplay(app) {
+        Ok((exe, _, plugins)) => {
+            let has_d3d11 = plugins
+                .as_ref()
+                .is_some_and(|p| p.join("libgstd3d11.dll").is_file());
+            (true, exe.to_string_lossy().to_string(), has_d3d11)
+        }
+        Err(_) => (false, String::new(), false),
+    };
+    json!({
+        "lanIp": lan_ip,
+        "hostname": crate::localsend::device_alias(),
+        "broadcastName": cfg.broadcast_name,
+        "engineState": state,
+        "engineDetail": detail,
+        "uxplayFound": ux_found,
+        "uxplayPath": ux_path,
+        "d3d11": d3d11,
+        "fps": cfg.fps,
+        "vsync": cfg.vsync,
+        "audioOutputDevice": cfg.audio_output_device,
+        "autoSwitchAudioOutput": cfg.auto_switch_audio_output,
+        "localsendPort": 53317,
+        "airplay2Running": crate::airplay2::is_running(),
+    })
+}
+
+pub fn is_airplay_receiver_running() -> bool {
+    let mut st = STATE.lock().unwrap();
+    if let Some((child, _)) = st.airplay_rx.as_mut() {
+        if child.try_wait().ok().flatten().is_none() {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn restart_airplay_receiver(app: &AppHandle) -> anyhow::Result<()> {
+    if is_airplay_receiver_running() {
+        stop_airplay_receiver(app);
+        start_airplay_receiver(app)?;
+    }
+    Ok(())
+}
+
+/// Start the AirPlay screen/audio receiver. Advertises this PC using the
+/// configured broadcast name (default "Mirr").
 /// The engine runs with a hidden console; its video output is docked into the
 /// main window by `embed::ensure_watcher`.
 pub fn start_airplay_receiver(app: &AppHandle) -> anyhow::Result<()> {
@@ -215,7 +331,10 @@ pub fn start_airplay_receiver(app: &AppHandle) -> anyhow::Result<()> {
     }
 
     let (exe, bin, plugins) = resolve_uxplay(app)?;
-    let name = "Mirr"; // the name iPhones see in the Screen Mirroring sheet
+    let cfg = get_config();
+    let name = cfg.broadcast_name.as_str();
+    let fps_str = cfg.fps.to_string();
+    let vsync_arg = if cfg.vsync { "yes" } else { "no" };
 
     // Export dir must exist BEFORE spawn; degrade (no now-playing/remote)
     // rather than let uxplay exit(1) on an unwritable path.
@@ -228,11 +347,21 @@ pub fn start_airplay_receiver(app: &AppHandle) -> anyhow::Result<()> {
     cmd.args([
         "-n", name,
         "-nh",       // no "@hostname" suffix
-        "-vsync", "no", // favour latency over AV-sync in mirror mode (sink runs sync=false)
-        "-fps", "60",
+        "-p", "7100", // port 7100 for screen mirroring (coexists with AirPlay 2 on 7000)
+        "-vsync", vsync_arg, // favour latency ("no") or lip-synced video ("yes")
+        "-fps", &fps_str,
         "-nofreeze", // don't leave a frozen last frame after a connection reset
-    ])
-    .current_dir(&bin)
+    ]);
+
+    // Audio output sink / device selection
+    let audio_dev = cfg.audio_output_device.trim();
+    if !audio_dev.is_empty() && audio_dev != "default" {
+        cmd.args(["-as", &format!("wasapisink device=\"{}\"", audio_dev)]);
+    } else {
+        cmd.args(["-as", "wasapisink"]);
+    }
+
+    cmd.current_dir(&bin)
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
 
@@ -337,6 +466,7 @@ fn spawn_log_reader(app: AppHandle, generation: u64, pipe: impl std::io::Read + 
             }
             crate::nowplaying::on_log_line(&app, line);
             crate::dacp::on_log_line(&app, line);
+            crate::discovery::on_log_line(&app, line);
             // NOTE: there used to be an `app.emit("airplay://log", ...)` here.
             // It was removed deliberately: no frontend code ever listened for
             // it, and UxPlay/GStreamer are chatty on both pipes (an `audio
@@ -366,6 +496,8 @@ fn spawn_log_reader(app: AppHandle, generation: u64, pipe: impl std::io::Read + 
             emit_status(&app, "stopped", "");
             crate::nowplaying::on_engine_stop(&app);
             crate::dacp::on_engine_stop(&app);
+            crate::discovery::note_client_disconnected();
+            crate::discovery::emit_devices();
             clean_export_files();
         }
     });
@@ -389,19 +521,26 @@ pub fn stop_airplay_receiver(app: &AppHandle) {
         emit_status(app, "stopped", "");
         crate::nowplaying::on_engine_stop(app);
         crate::dacp::on_engine_stop(app);
+        crate::discovery::note_client_disconnected();
+        crate::discovery::emit_devices();
         clean_export_files();
     }
 }
 
 /// Start AirCast: capture this PC's audio (WASAPI loopback) and stream to `target_ip`.
 pub fn start_aircast(app: &AppHandle, target_ip: &str) -> anyhow::Result<()> {
+    let path = engine_path(app, "aircast.exe")?;
+    if !path.is_file() {
+        return Err(anyhow::anyhow!(
+            "AirCast engine (engines/aircast.exe) is not bundled yet"
+        ));
+    }
     let mut st = STATE.lock().unwrap();
     // retarget: never leak a second concurrent capture process
     if let Some(mut old) = st.aircast.take() {
         let _ = old.kill();
         let _ = old.wait();
     }
-    let path = engine_path(app, "aircast.exe")?;
     let mut cmd = Command::new(path);
     cmd.args(["--target", target_ip, "--source", "wasapi-loopback"]);
     #[cfg(windows)]
@@ -415,7 +554,6 @@ pub fn start_aircast(app: &AppHandle, target_ip: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
 pub fn stop_aircast() {
     if let Some(mut c) = STATE.lock().unwrap().aircast.take() {
         let _ = c.kill();
@@ -423,28 +561,21 @@ pub fn stop_aircast() {
     }
 }
 
-/// Start the AirPlay 2 lossless audio receiver (stretch goal on Windows).
+/// Start the AirPlay 2 lossless audio receiver (pure Rust in-process engine).
 pub fn start_airplay2_receiver(app: &AppHandle) -> anyhow::Result<()> {
-    let mut st = STATE.lock().unwrap();
-    if let Some(child) = st.airplay2_rx.as_mut() {
-        if child.try_wait()?.is_none() {
-            return Ok(()); // already running
-        }
-        st.airplay2_rx = None; // reap a dead child, then restart
-    }
-    let path = engine_path(app, "shairport.exe")?;
-    let name = crate::localsend::device_alias();
-    let mut cmd = Command::new(path);
-    cmd.args(["-a", &name]);
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let child = cmd
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("AirPlay 2 engine unavailable on this platform yet: {e}"))?;
-    #[cfg(windows)]
-    job::assign(&child);
-    st.airplay2_rx = Some(child);
-    Ok(())
+    crate::airplay2::start(app.clone())
+}
+
+/// Stop the AirPlay 2 receiver.
+pub fn stop_airplay2_receiver(app: &AppHandle) {
+    crate::airplay2::stop(Some(app));
+}
+
+/// AirPlay 2 receiver state query.
+pub fn airplay2_state() -> serde_json::Value {
+    json!({
+        "running": crate::airplay2::is_running()
+    })
 }
 
 /// Kill every engine — call on app exit. The Job Object is the crash-path
@@ -464,5 +595,6 @@ pub fn shutdown_all() {
         }
         *child = None;
     }
+    crate::airplay2::stop(None);
     clean_export_files();
 }

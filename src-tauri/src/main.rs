@@ -1,7 +1,9 @@
 // Mirr — Windows 11 Apple wireless bridge
 // AirPlay (receive) · AirPlay 2 (audio) · AirCast (send) · LocalSend (transfer)
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![windows_subsystem = "windows"]
 
+mod airplay2;
+mod audio;
 mod dacp;
 mod discovery;
 #[cfg(windows)]
@@ -10,7 +12,7 @@ mod engines;
 mod localsend;
 mod nowplaying;
 
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 #[tauri::command]
 fn device_name() -> String {
@@ -55,6 +57,143 @@ fn receiver_state() -> serde_json::Value {
 }
 
 #[tauri::command]
+fn network_diagnostics(app: tauri::AppHandle) -> serde_json::Value {
+    engines::diagnostics(&app)
+}
+
+#[tauri::command]
+fn get_settings() -> engines::EngineConfig {
+    engines::get_config()
+}
+
+#[tauri::command]
+fn list_audio_devices() -> Vec<audio::AudioDevice> {
+    audio::list_devices()
+}
+
+#[tauri::command]
+fn get_default_audio_device() -> Option<audio::AudioDevice> {
+    audio::get_default_device()
+}
+
+#[tauri::command]
+fn update_settings(
+    app: tauri::AppHandle,
+    config: Option<engines::EngineConfig>,
+    restart_receiver: Option<bool>,
+    broadcast_name: Option<String>,
+    fps: Option<u32>,
+    vsync: Option<bool>,
+    always_on_top_mirror: Option<bool>,
+    auto_theater: Option<bool>,
+    audio_output_device: Option<String>,
+    auto_switch_audio_output: Option<bool>,
+    show_transport_controls: Option<bool>,
+    receiver_mode: Option<String>,
+) -> Result<engines::EngineConfig, String> {
+    let cfg = if let Some(c) = config {
+        c
+    } else {
+        let mut c = engines::get_config();
+        if let Some(b) = broadcast_name { c.broadcast_name = b; }
+        if let Some(f) = fps { c.fps = f; }
+        if let Some(v) = vsync { c.vsync = v; }
+        if let Some(a) = always_on_top_mirror { c.always_on_top_mirror = a; }
+        if let Some(at) = auto_theater { c.auto_theater = at; }
+        if let Some(ad) = audio_output_device { c.audio_output_device = ad; }
+        if let Some(asw) = auto_switch_audio_output { c.auto_switch_audio_output = asw; }
+        if let Some(stc) = show_transport_controls { c.show_transport_controls = stc; }
+        if let Some(rm) = receiver_mode { c.receiver_mode = rm; }
+        c
+    };
+    let should_restart = restart_receiver.unwrap_or(false);
+    let saved = engines::set_config(cfg);
+    if saved.broadcast_name != "Mirr" {
+        localsend::set_custom_alias(Some(saved.broadcast_name.clone()));
+    } else {
+        localsend::set_custom_alias(None);
+    }
+    if should_restart {
+        if saved.receiver_mode != "airplay2" {
+            engines::stop_airplay_receiver(&app);
+            let _ = engines::start_airplay_receiver(&app);
+        } else {
+            engines::stop_airplay_receiver(&app);
+        }
+
+        if saved.receiver_mode != "airplay1" {
+            engines::stop_airplay2_receiver(&app);
+            let _ = engines::start_airplay2_receiver(&app);
+        } else {
+            engines::stop_airplay2_receiver(&app);
+        }
+    }
+    Ok(saved)
+}
+
+#[tauri::command]
+fn set_always_on_top(app: tauri::AppHandle, on_top: bool) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("main") {
+        win.set_always_on_top(on_top).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_pip_mode(app: tauri::AppHandle, pip: bool, restore_always_on_top: bool) -> Result<(), String> {
+    let Some(win) = app.get_webview_window("main") else {
+        return Err("main window not found".into());
+    };
+    if pip {
+        let _ = win.unmaximize();
+        let _ = win.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize {
+            width: 220.0,
+            height: 200.0,
+        })));
+        let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize {
+            width: 320.0,
+            height: 320.0,
+        }));
+        let _ = win.set_always_on_top(true);
+    } else {
+        let _ = win.set_always_on_top(restore_always_on_top);
+        let _ = win.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize {
+            width: 920.0,
+            height: 620.0,
+        })));
+        let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize {
+            width: 1180.0,
+            height: 760.0,
+        }));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn reveal_in_explorer(path: Option<String>) -> Result<(), String> {
+    let dir = localsend::downloads_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let canon_dir = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+    if let Some(p) = path.filter(|s| !s.is_empty()) {
+        let target = std::path::PathBuf::from(p);
+        if let Ok(canon_target) = target.canonicalize() {
+            if canon_target.starts_with(&canon_dir) {
+                std::process::Command::new("explorer.exe")
+                    .arg(format!("/select,{}", canon_target.display()))
+                    .spawn()
+                    .map_err(|e| e.to_string())?;
+                return Ok(());
+            }
+        }
+    }
+    std::process::Command::new("explorer.exe")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 fn nowplaying_state() -> serde_json::Value {
     nowplaying::state()
 }
@@ -70,8 +209,56 @@ async fn dacp_command(cmd: String) -> Result<u16, String> {
 }
 
 #[tauri::command]
+fn audio_get_volume() -> Result<f32, String> {
+    let cfg = engines::get_config();
+    let dev_id = if cfg.audio_output_device == "default" || cfg.audio_output_device.is_empty() {
+        None
+    } else {
+        Some(cfg.audio_output_device.as_str())
+    };
+    audio::get_volume(dev_id)
+}
+
+#[tauri::command]
+fn audio_set_volume(pct: f32) -> Result<(), String> {
+    let cfg = engines::get_config();
+    let dev_id = if cfg.audio_output_device == "default" || cfg.audio_output_device.is_empty() {
+        None
+    } else {
+        Some(cfg.audio_output_device.as_str())
+    };
+    audio::set_volume(pct, dev_id)
+}
+
+#[tauri::command]
 async fn dacp_set_volume(pct: f32) -> Result<u16, String> {
-    dacp::set_volume(pct).await
+    // 1. Directly adjust Windows audio endpoint volume on the active/selected playback device
+    let cfg = engines::get_config();
+    let dev_id = if cfg.audio_output_device == "default" || cfg.audio_output_device.is_empty() {
+        None
+    } else {
+        Some(cfg.audio_output_device.as_str())
+    };
+    let _ = audio::set_volume(pct, dev_id);
+
+    // 2. Also send DACP volume command to the connected Apple device if DACP is active
+    let _ = dacp::set_volume(pct).await;
+    Ok(200)
+}
+
+#[tauri::command]
+async fn dacp_play_pause() -> Result<u16, String> {
+    dacp::command("playpause".into()).await
+}
+
+#[tauri::command]
+async fn dacp_next() -> Result<u16, String> {
+    dacp::command("nextitem".into()).await
+}
+
+#[tauri::command]
+async fn dacp_prev() -> Result<u16, String> {
+    dacp::command("previtem".into()).await
 }
 
 #[tauri::command]
@@ -80,8 +267,23 @@ fn start_aircast(app: tauri::AppHandle, target_ip: String) -> Result<(), String>
 }
 
 #[tauri::command]
+fn stop_aircast() {
+    engines::stop_aircast();
+}
+
+#[tauri::command]
 fn start_airplay2_receiver(app: tauri::AppHandle) -> Result<(), String> {
     engines::start_airplay2_receiver(&app).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn stop_airplay2_receiver(app: tauri::AppHandle) {
+    engines::stop_airplay2_receiver(&app);
+}
+
+#[tauri::command]
+fn airplay2_state() -> serde_json::Value {
+    engines::airplay2_state()
 }
 
 /// The frontend reports where the mirror video should be docked, in physical
@@ -113,24 +315,47 @@ fn mirror_active() -> bool {
 }
 
 fn main() {
+    #[cfg(windows)]
+    unsafe {
+        let _ = windows::Win32::System::Console::FreeConsole();
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // Set AppHandle for live discovery event emission
+            discovery::set_app_handle(app.handle().clone());
             // mDNS discovery of AirPlay screen receivers + RAOP audio targets
             if let Err(e) = discovery::start() {
                 eprintln!("[discovery] {e}");
             }
             // LocalSend multicast discovery + HTTP receive server
             localsend::start(app.handle().clone());
-            // Auto-start the AirPlay receiver so the PC is discoverable
-            // the moment the app opens — no launcher scripts needed.
+            // Windows audio output device watcher & auto-switching
+            audio::ensure_watcher(app.handle().clone());
+            // Auto-start engines based on configured receiver_mode
             let handle = app.handle().clone();
             std::thread::spawn(move || {
-                if let Err(e) = engines::start_airplay_receiver(&handle) {
-                    let _ = handle.emit(
-                        "airplay://status",
-                        serde_json::json!({ "state": "error", "detail": e.to_string() }),
-                    );
+                let cfg = engines::get_config();
+                if cfg.receiver_mode != "airplay2" {
+                    if let Err(e) = engines::start_airplay_receiver(&handle) {
+                        let _ = handle.emit(
+                            "airplay://status",
+                            serde_json::json!({ "state": "error", "detail": e.to_string() }),
+                        );
+                    }
+                }
+            });
+            // Auto-start the embedded AirPlay 2 receiver ("Mirr Audio" on port 7000)
+            let handle_a2 = app.handle().clone();
+            std::thread::spawn(move || {
+                let cfg = engines::get_config();
+                if cfg.receiver_mode != "airplay1" {
+                    if let Err(e) = engines::start_airplay2_receiver(&handle_a2) {
+                        let _ = handle_a2.emit(
+                            "airplay2://status",
+                            serde_json::json!({ "state": "error", "detail": e.to_string() }),
+                        );
+                    }
                 }
             });
             Ok(())
@@ -152,15 +377,31 @@ fn main() {
             start_airplay_receiver,
             stop_airplay_receiver,
             receiver_state,
+            network_diagnostics,
+            get_settings,
+            update_settings,
+            set_always_on_top,
+            set_pip_mode,
+            reveal_in_explorer,
             nowplaying_state,
             dacp_state,
             dacp_command,
             dacp_set_volume,
+            dacp_play_pause,
+            dacp_next,
+            dacp_prev,
             start_aircast,
+            stop_aircast,
             start_airplay2_receiver,
+            stop_airplay2_receiver,
+            airplay2_state,
             set_video_rect,
             set_video_visible,
             mirror_active,
+            list_audio_devices,
+            get_default_audio_device,
+            audio_get_volume,
+            audio_set_volume,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Mirr");

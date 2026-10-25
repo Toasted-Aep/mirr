@@ -15,7 +15,7 @@ const listen = TAURI && window.__TAURI__.event ? window.__TAURI__.event.listen :
 const SCREEN_RADIUS = 20;
 const ZOOM_MIN = 100, ZOOM_MAX = 300, ZOOM_STEP = 25;
 
-const $ = (id) => document.getElementById(id);
+const $ = (id) => document.getElementById(id) || document.querySelector(`[data-alias="${id}"]`);
 $("envtag").textContent = TAURI ? "Live · Tauri" : "Demo mode — run the app for the real thing";
 if (TAURI) document.body.classList.add("tauri");
 
@@ -29,14 +29,334 @@ if (TAURI && window.__TAURI__.window) {
 }
 
 /* ---------- toasts ---------- */
-function toast(msg, bad = false) {
+function toast(msg, bad = false, actionLabel = "", onAction = null) {
   const el = document.createElement("div");
   el.className = "toast" + (bad ? " bad" : "");
-  el.textContent = msg;
+  const span = document.createElement("span");
+  span.textContent = msg;
+  el.appendChild(span);
+  if (actionLabel && typeof onAction === "function") {
+    const act = document.createElement("button");
+    act.className = "toast-act";
+    act.textContent = actionLabel;
+    act.addEventListener("click", () => {
+      onAction();
+      el.remove();
+    });
+    el.appendChild(act);
+  }
   $("toasts").appendChild(el);
-  setTimeout(() => { el.style.opacity = "0"; el.style.transition = "opacity .4s"; }, 3600);
-  setTimeout(() => el.remove(), 4100);
+  const dur = actionLabel ? 5200 : 3600;
+  setTimeout(() => { el.style.opacity = "0"; el.style.transition = "opacity .4s"; }, dur);
+  setTimeout(() => el.remove(), dur + 500);
 }
+
+/* ---------- runtime settings state ---------- */
+let currentBroadcastName = "Mirr";
+let runtimeSettings = {
+  broadcastName: "Mirr",
+  fps: 60,
+  vsync: false,
+  alwaysOnTopMirror: false,
+  autoTheater: false,
+  audioOutputDevice: "default",
+  autoSwitchAudioOutput: true,
+  bgTheme: "horizon",
+  // REMINDER: Default showTransportControls to false on initial setup of the app
+  // as requested until previous/next song and pause/play controls are fully resolved.
+  showTransportControls: false,
+  receiverMode: "dual"
+};
+let pipMode = false;
+
+function applyTheme(themeKey) {
+  const valid = ["horizon", "graphite", "ink", "espresso", "grid", "acrylic", "aurora"];
+  const t = valid.includes(themeKey) ? themeKey : "horizon";
+  runtimeSettings.bgTheme = t;
+  const bg = document.querySelector(".bg");
+  if (bg) {
+    bg.className = "bg theme-" + t;
+  }
+  document.body.classList.toggle("theme-acrylic", t === "acrylic");
+  document.querySelectorAll("#themeGrid .theme-card").forEach((card) => {
+    card.classList.toggle("active", card.dataset.theme === t);
+  });
+}
+
+let currentAccentStyle = {
+  type: "color",
+  value: "#A470E0",
+  name: "Copic FV2 · Violet"
+};
+
+function applyAccentStyle(styleObj, save = true) {
+  if (!styleObj || !styleObj.value) return;
+  currentAccentStyle = styleObj;
+
+  const root = document.documentElement;
+  if (styleObj.type === "color") {
+    root.style.setProperty("--accent", styleObj.value);
+    root.style.setProperty("--accent-fill", styleObj.value);
+    root.style.setProperty("--accent2", styleObj.value);
+  } else {
+    root.style.setProperty("--accent-fill", styleObj.value);
+    if (styleObj.stops && styleObj.stops.length > 0) {
+      root.style.setProperty("--accent", styleObj.stops[0].color);
+      if (styleObj.stops.length > 1) {
+        root.style.setProperty("--accent2", styleObj.stops[styleObj.stops.length - 1].color);
+      }
+    } else {
+      const hexes = styleObj.value.match(/#[0-9A-Fa-f]{6}/g);
+      if (hexes && hexes.length > 0) {
+        root.style.setProperty("--accent", hexes[0]);
+        if (hexes.length > 1) {
+          root.style.setProperty("--accent2", hexes[hexes.length - 1]);
+        }
+      } else {
+        root.style.setProperty("--accent", "#A470E0");
+      }
+    }
+  }
+
+  document.querySelectorAll(".accent-chip").forEach((chip) => {
+    const isMatch = (chip.dataset.val || "").toLowerCase().trim() === styleObj.value.toLowerCase().trim();
+    chip.classList.toggle("active", isMatch);
+  });
+
+  if ($("builderPreviewPlay")) $("builderPreviewPlay").style.background = styleObj.value;
+  if ($("builderPreviewBar")) $("builderPreviewBar").style.background = styleObj.value;
+  if ($("builderPreviewWave")) {
+    $("builderPreviewWave").querySelectorAll("i").forEach(el => el.style.background = styleObj.value);
+  }
+  if ($("builderCssCode")) $("builderCssCode").textContent = styleObj.value;
+
+  if (save) {
+    try {
+      localStorage.setItem("mirr_accent_style", JSON.stringify(styleObj));
+    } catch (_) {}
+  }
+}
+
+const gradientBuilderState = {
+  angle: 135,
+  stops: [
+    { color: "#A470E0", pos: 0 },
+    { color: "#6C5CE7", pos: 100 }
+  ]
+};
+
+function getBuilderGradientCss() {
+  const sortedStops = [...gradientBuilderState.stops].sort((a, b) => a.pos - b.pos);
+  const stopsStr = sortedStops.map(s => `${s.color} ${s.pos}%`).join(", ");
+  return `linear-gradient(${gradientBuilderState.angle}deg, ${stopsStr})`;
+}
+
+function updateBuilderPreview() {
+  const css = getBuilderGradientCss();
+  if ($("builderPreviewPlay")) $("builderPreviewPlay").style.background = css;
+  if ($("builderPreviewBar")) $("builderPreviewBar").style.background = css;
+  if ($("builderPreviewWave")) {
+    $("builderPreviewWave").querySelectorAll("i").forEach(el => el.style.background = css);
+  }
+  if ($("builderCssCode")) $("builderCssCode").textContent = css;
+}
+
+function renderBuilderStops() {
+  const list = $("builderStopsList");
+  if (!list) return;
+  list.innerHTML = "";
+
+  gradientBuilderState.stops.forEach((stop, idx) => {
+    const row = document.createElement("div");
+    row.className = "stop-row";
+    row.innerHTML = `
+      <input type="color" value="${stop.color}" class="stop-color-input" aria-label="Stop color">
+      <input type="text" value="${stop.color}" class="stop-hex-input" spellcheck="false" maxlength="9">
+      <input type="range" min="0" max="100" value="${stop.pos}" class="stop-pos-slider" aria-label="Stop position">
+      <span class="stop-pos-val">${stop.pos}%</span>
+      ${gradientBuilderState.stops.length > 2 ? `<button type="button" class="stop-remove-btn" title="Remove stop">✕</button>` : ""}
+    `;
+
+    const colorInput = row.querySelector(".stop-color-input");
+    const hexInput = row.querySelector(".stop-hex-input");
+    const posInput = row.querySelector(".stop-pos-slider");
+    const posVal = row.querySelector(".stop-pos-val");
+    const removeBtn = row.querySelector(".stop-remove-btn");
+
+    colorInput.addEventListener("input", (e) => {
+      stop.color = e.target.value;
+      hexInput.value = e.target.value;
+      updateBuilderPreview();
+    });
+
+    hexInput.addEventListener("input", (e) => {
+      let val = e.target.value.trim();
+      if (!val.startsWith("#")) val = "#" + val;
+      if (/^#[0-9A-Fa-f]{6}$/.test(val)) {
+        stop.color = val;
+        colorInput.value = val;
+        updateBuilderPreview();
+      }
+    });
+
+    posInput.addEventListener("input", (e) => {
+      stop.pos = Number(e.target.value);
+      posVal.textContent = stop.pos + "%";
+      updateBuilderPreview();
+    });
+
+    if (removeBtn) {
+      removeBtn.addEventListener("click", () => {
+        gradientBuilderState.stops.splice(idx, 1);
+        renderBuilderStops();
+        updateBuilderPreview();
+      });
+    }
+
+    list.appendChild(row);
+  });
+}
+
+function initAccentControls() {
+  document.querySelectorAll(".accent-chip").forEach((chip) => {
+    const pick = () => {
+      const type = chip.dataset.type;
+      const val = chip.dataset.val;
+      const name = chip.querySelector(".chip-name")?.textContent || val;
+      applyAccentStyle({ type, value: val, name });
+      if (type === "gradient") {
+        const hexes = val.match(/#[0-9A-Fa-f]{6}/g);
+        if (hexes && hexes.length >= 2) {
+          gradientBuilderState.stops = hexes.map((hex, i) => ({
+            color: hex,
+            pos: Math.round((i / (hexes.length - 1)) * 100)
+          }));
+          renderBuilderStops();
+          updateBuilderPreview();
+        }
+      } else if (type === "color") {
+        if ($("builderSolidColorInput")) $("builderSolidColorInput").value = val;
+        if ($("builderSolidHexInput")) $("builderSolidHexInput").value = val;
+      }
+      toast(`Accent set to ${name}`);
+    };
+    chip.addEventListener("click", pick);
+  });
+
+  if ($("builderAngleSlider")) {
+    $("builderAngleSlider").addEventListener("input", (e) => {
+      gradientBuilderState.angle = Number(e.target.value);
+      if ($("builderAngleVal")) $("builderAngleVal").textContent = e.target.value + "°";
+      updateBuilderPreview();
+    });
+  }
+
+  document.querySelectorAll(".angle-quick-btns button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const a = Number(btn.dataset.angle);
+      gradientBuilderState.angle = a;
+      if ($("builderAngleSlider")) $("builderAngleSlider").value = a;
+      if ($("builderAngleVal")) $("builderAngleVal").textContent = a + "°";
+      updateBuilderPreview();
+    });
+  });
+
+  if ($("builderAddStopBtn")) {
+    $("builderAddStopBtn").addEventListener("click", () => {
+      if (gradientBuilderState.stops.length >= 6) return;
+      const last = gradientBuilderState.stops[gradientBuilderState.stops.length - 1];
+      const newPos = Math.min(100, Math.round(last.pos + 20));
+      gradientBuilderState.stops.push({ color: "#00C6FF", pos: newPos });
+      renderBuilderStops();
+      updateBuilderPreview();
+    });
+  }
+
+  if ($("builderApplyGradientBtn")) {
+    $("builderApplyGradientBtn").addEventListener("click", () => {
+      const css = getBuilderGradientCss();
+      applyAccentStyle({
+        type: "gradient",
+        value: css,
+        stops: [...gradientBuilderState.stops],
+        angle: gradientBuilderState.angle,
+        name: "Custom Gradient"
+      });
+      toast("Custom gradient applied!");
+    });
+  }
+
+  if ($("builderSolidColorInput") && $("builderSolidHexInput")) {
+    $("builderSolidColorInput").addEventListener("input", (e) => {
+      $("builderSolidHexInput").value = e.target.value;
+    });
+    $("builderSolidHexInput").addEventListener("input", (e) => {
+      let val = e.target.value.trim();
+      if (!val.startsWith("#")) val = "#" + val;
+      if (/^#[0-9A-Fa-f]{6}$/.test(val)) {
+        $("builderSolidColorInput").value = val;
+      }
+    });
+  }
+
+  if ($("builderApplySolidBtn")) {
+    $("builderApplySolidBtn").addEventListener("click", () => {
+      let hex = ($("builderSolidHexInput")?.value || "#A470E0").trim();
+      if (!hex.startsWith("#")) hex = "#" + hex;
+      if (!/^#[0-9A-Fa-f]{6}$/.test(hex)) {
+        toast("Please enter a valid 6-digit hex color (e.g. #A470E0)", true);
+        return;
+      }
+      applyAccentStyle({ type: "color", value: hex, name: "Custom Solid" });
+      toast("Custom solid color applied: " + hex);
+    });
+  }
+
+  if ($("builderResetBtn")) {
+    $("builderResetBtn").addEventListener("click", () => {
+      applyAccentStyle({ type: "color", value: "#A470E0", name: "Copic FV2 · Violet" });
+      if ($("builderSolidColorInput")) $("builderSolidColorInput").value = "#A470E0";
+      if ($("builderSolidHexInput")) $("builderSolidHexInput").value = "#A470E0";
+      toast("Accent reset to Copic FV2");
+    });
+  }
+
+  renderBuilderStops();
+  updateBuilderPreview();
+
+  try {
+    const savedAccent = JSON.parse(localStorage.getItem("mirr_accent_style") || "null");
+    if (savedAccent && savedAccent.value) {
+      applyAccentStyle(savedAccent, false);
+      if (savedAccent.type === "gradient" && Array.isArray(savedAccent.stops) && savedAccent.stops.length >= 2) {
+        gradientBuilderState.stops = savedAccent.stops;
+        if (typeof savedAccent.angle === "number") {
+          gradientBuilderState.angle = savedAccent.angle;
+          if ($("builderAngleSlider")) $("builderAngleSlider").value = savedAccent.angle;
+          if ($("builderAngleVal")) $("builderAngleVal").textContent = savedAccent.angle + "°";
+        }
+        renderBuilderStops();
+        updateBuilderPreview();
+      } else if (savedAccent.type === "color") {
+        if ($("builderSolidColorInput")) $("builderSolidColorInput").value = savedAccent.value;
+        if ($("builderSolidHexInput")) $("builderSolidHexInput").value = savedAccent.value;
+      }
+    } else {
+      applyAccentStyle({ type: "color", value: "#A470E0", name: "Copic FV2 · Violet" }, false);
+    }
+  } catch (_) {
+    applyAccentStyle({ type: "color", value: "#A470E0", name: "Copic FV2 · Violet" }, false);
+  }
+}
+
+try {
+  const initCached = JSON.parse(localStorage.getItem("mirr_settings") || "null");
+  if (initCached && initCached.bgTheme) {
+    runtimeSettings.bgTheme = initCached.bgTheme;
+  }
+} catch (_) {}
+applyTheme(runtimeSettings.bgTheme || "horizon");
+initAccentControls();
 
 /* ---------- navigation ---------- */
 const titles = {
@@ -54,7 +374,7 @@ function nav(btn) {
   const view = $(v);
   void view.offsetWidth; view.classList.add("show");
   $("vtitle").textContent = titles[v][0];
-  $("vsub").textContent = titles[v][1];
+  $("vsub").textContent = v === "receive" ? `Your PC appears as “${currentBroadcastName}”` : titles[v][1];
   // the docked mirror video is a native window — hide it whenever the
   // receive stage isn't the active pane
   if (TAURI) invoke("set_video_visible", { visible: v === "receive" }).catch(() => {});
@@ -84,26 +404,13 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<"
 
 /* ---------- demo data (browser only) ---------- */
 const DEMO = {
-  airplayDevices: [
-    { name: "iPhone 16 Pro", meta: "Nearby", online: true, type: "iphone" },
-    { name: "MacBook Pro", meta: '14" · macOS 26', online: true, type: "mac" },
-    { name: "iPad Air", meta: "Last seen 2h ago", online: false, type: "ipad" }
-  ],
+  airplayDevices: [],
   castTargets: [
     { name: "Living Room HomePod", meta: "AirPlay 2 · paired", on: true, vol: 82 },
     { name: "Kitchen — AirPort Express", meta: "Classic AirPlay · RAOP", on: false, vol: 55 },
     { name: "Office Speakers", meta: "AirPlay 2 · grouped", on: false, vol: 40 }
   ],
-  a2rooms: [
-    { name: "This PC (Mirr)", meta: "Lossless · master", on: true, vol: 75 },
-    { name: "Living Room HomePod", meta: "Grouped · in sync", on: true, vol: 60 },
-    { name: "Office Speakers", meta: "Grouped · +12 ms buffer", on: false, vol: 45 }
-  ],
-  localsendPeers: [
-    { alias: "iPhone 16 Pro", model: "iOS 26", type: "iphone" },
-    { alias: "MacBook Pro", model: "macOS 26", type: "mac" },
-    { alias: "Pixel 9", model: "Android 16", type: "android" }
-  ]
+  localsendPeers: []
 };
 
 /* ============================================================
@@ -119,6 +426,7 @@ let windowFocused = document.hasFocus();
    zone if these lived further down the file. */
 const CALM_AFTER_MS = 12000;
 let calmTimer = null;
+let lastCalmReset = 0;
 
 /* ---------- audio-only Now Playing session ---------- */
 let npActive = false;
@@ -127,13 +435,45 @@ let npMeta = { title: "", artist: "", album: "", hasData: false, rev: -1 };
 // local 1 Hz elapsed-time ticker: extrapolated from the last progress
 // baseline using the wall clock, re-baselined on every progress event
 const np = { baseSec: null, durSec: null, baseWall: 0, playing: false };
-// same track info the AirPlay-2 demo button uses — reused for the
-// Now Playing stage's "Simulate audio stream" demo path
-const DEMO_TRACK = { title: "Resonance — Ambient Mix", artist: "Aurora Fields", album: "Night Drift" };
+// demo playlist used for explore mode and fallback stepping with embedded art
+const DEMO_PLAYLIST = [
+  {
+    title: "Resonance — Ambient Mix",
+    artist: "Aurora Fields",
+    album: "Night Drift",
+    duration: 222,
+    art: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400"><defs><linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="%237db2ff"/><stop offset="50%" stop-color="%23c894ff"/><stop offset="100%" stop-color="%23ff8ec0"/></linearGradient><radialGradient id="r1" cx="30%" cy="30%" r="70%"><stop offset="0%" stop-color="%23ffffff" stop-opacity="0.35"/><stop offset="100%" stop-color="%23000000" stop-opacity="0.4"/></radialGradient></defs><rect width="400" height="400" rx="36" fill="url(%23g1)"/><rect width="400" height="400" rx="36" fill="url(%23r1)"/><circle cx="200" cy="200" r="90" fill="none" stroke="%23ffffff" stroke-width="5" stroke-opacity="0.6"/><path d="M165 140v120l95-60z" fill="%23ffffff" fill-opacity="0.9"/></svg>'
+  },
+  {
+    title: "Solaris (Extended)",
+    artist: "Komorebi",
+    album: "Atmospheres Vol. 2",
+    duration: 198,
+    art: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400"><defs><linearGradient id="g2" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="%23ff9a44"/><stop offset="50%" stop-color="%23fc6076"/><stop offset="100%" stop-color="%237a42f4"/></linearGradient><radialGradient id="r2" cx="70%" cy="30%" r="70%"><stop offset="0%" stop-color="%23ffffff" stop-opacity="0.3"/><stop offset="100%" stop-color="%23000000" stop-opacity="0.45"/></radialGradient></defs><rect width="400" height="400" rx="36" fill="url(%23g2)"/><rect width="400" height="400" rx="36" fill="url(%23r2)"/><circle cx="200" cy="200" r="100" fill="%23ffffff" fill-opacity="0.15"/><circle cx="200" cy="200" r="60" fill="%23ffffff" fill-opacity="0.25"/></svg>'
+  },
+  {
+    title: "Midnight City Lights",
+    artist: "Vapor Wave",
+    album: "Neon Horizons",
+    duration: 245,
+    art: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400"><defs><linearGradient id="g3" x1="0%" y1="100%" x2="100%" y2="0%"><stop offset="0%" stop-color="%2300f2fe"/><stop offset="50%" stop-color="%234facfe"/><stop offset="100%" stop-color="%236b11ff"/></linearGradient><radialGradient id="r3" cx="50%" cy="50%" r="70%"><stop offset="0%" stop-color="%23ffffff" stop-opacity="0.25"/><stop offset="100%" stop-color="%23000000" stop-opacity="0.5"/></radialGradient></defs><rect width="400" height="400" rx="36" fill="url(%23g3)"/><rect width="400" height="400" rx="36" fill="url(%23r3)"/><polygon points="200,110 280,270 120,270" fill="none" stroke="%2300f2fe" stroke-width="6" stroke-opacity="0.8"/></svg>'
+  }
+];
+let demoTrackIdx = 0;
+const DEMO_TRACK = DEMO_PLAYLIST[0];
+let isDemoAudioActive = false;
 
 function setDisco(txt, dotCls) {
   $("disco").textContent = txt;
   $("discoDot").className = "dot " + dotCls;
+}
+
+function updatePipTitle() {
+  const el = $("pipTitle");
+  if (!el) return;
+  if (mirroring) el.textContent = `Mirroring · ${currentBroadcastName}`;
+  else if (npActive) el.textContent = (npMeta.hasData && npMeta.title) ? npMeta.title : "Audio Session";
+  else el.textContent = `Mirr · ${currentBroadcastName}`;
 }
 
 function applyEngineState(state, detail) {
@@ -151,9 +491,9 @@ function applyEngineState(state, detail) {
       break;
     case "ready":
       title.textContent = "Ready for AirPlay";
-      sub.innerHTML = "On your iPhone or Mac, open <b>Screen Mirroring</b> and pick <b>Mirr</b>";
+      sub.innerHTML = `On your iPhone or Mac, open <b>Screen Mirroring</b> and pick <b>${esc(currentBroadcastName)}</b>`;
       st.textContent = "Idle — waiting for a device";
-      setDisco("Discoverable as Mirr", "pulse");
+      setDisco("Discoverable as " + currentBroadcastName, "pulse");
       break;
     case "connecting":
       title.textContent = "Device connecting…";
@@ -181,6 +521,7 @@ function applyEngineState(state, detail) {
       break;
   }
   syncRxButton();
+  updatePipTitle();
 }
 
 function syncRxButton() {
@@ -197,12 +538,18 @@ function renderStage() {
   document.body.classList.toggle("nowplaying", showNp);
   $("npStage").hidden = !showNp;
   $("rxEmpty").classList.toggle("hide", mirroring || showNp);
-  $("npTransport").hidden = !dacpAvailable;
-  $("mTransport").hidden = !(mirroring && dacpAvailable);
+  if ($("npTransport")) $("npTransport").hidden = false;
+  if ($("npVolWrap")) $("npVolWrap").hidden = false;
+  if ($("mTransport")) {
+    $("mTransport").hidden = !mirroring;
+    if ($("mVolWrap")) $("mVolWrap").hidden = false;
+  }
+  updateTransportControlsVisibility();
   if (showNp) {
     const title = npMeta.hasData && npMeta.title ? npMeta.title : "Audio session live";
     $("rxState").textContent = "Audio session · " + title;
     setDisco("Audio session", "pulse");
+    updatePipTitle();
   } else {
     // the audio stage no longer owns the copy — hand the pill/label back to
     // the engine state (never recurses: applyEngineState doesn't call us)
@@ -240,8 +587,8 @@ function renderNpProgress() {
   $("npRemain").textContent = "−" + fmtTime(np.durSec - elapsed);
   $("npBar").style.width = (np.durSec > 0 ? (elapsed / np.durSec * 100) : 0) + "%";
 }
-// only ticks while an audio session owns the stage — no idle repaints
-setInterval(() => { if (npActive) renderNpProgress(); }, 1000);
+// only ticks while an audio session is actively playing and visible — no idle repaints
+setInterval(() => { if (npActive && np.playing && !document.hidden) renderNpProgress(); }, 1000);
 
 /* re-baseline on every nowplaying://progress event (and on late-attach
    rehydration, where ageMs backdates baseWall) */
@@ -255,17 +602,63 @@ function setNpProgress(position, duration, ageMs) {
 }
 
 function setNpArt(dataUrl) {
-  const art = $("npArt"), bg = $("npBg");
-  if (dataUrl) {
-    art.style.backgroundImage = `url("${dataUrl}")`;
-    art.classList.add("has-art");
-    bg.style.backgroundImage = `url("${dataUrl}")`;
-    bg.classList.add("has-art");
+  const art = $("npArt"), bg = $("npBg"), img = $("npArtImg");
+  if (dataUrl && typeof dataUrl === "string" && dataUrl.trim().length > 0) {
+    if (img) {
+      img.onerror = () => {
+        img.hidden = true;
+        if (art && !art.style.backgroundImage) art.classList.remove("has-art");
+      };
+      img.onload = () => {
+        img.hidden = false;
+        if (art) art.classList.add("has-art");
+      };
+      img.src = dataUrl;
+      img.hidden = false;
+    }
+    if (art) {
+      art.style.backgroundImage = `url("${dataUrl}")`;
+      art.style.backgroundSize = "cover";
+      art.style.backgroundPosition = "center center";
+      art.style.backgroundRepeat = "no-repeat";
+      art.classList.add("has-art");
+    }
+    if (bg) {
+      bg.style.backgroundImage = `url("${dataUrl}")`;
+      bg.classList.add("has-art");
+    }
   } else {
-    art.style.backgroundImage = "";
-    art.classList.remove("has-art");
-    bg.style.backgroundImage = "";
-    bg.classList.remove("has-art");
+    if (img) {
+      img.removeAttribute("src");
+      img.hidden = true;
+    }
+    if (art) {
+      art.style.backgroundImage = "";
+      art.classList.remove("has-art");
+    }
+    if (bg) {
+      bg.style.backgroundImage = "";
+      bg.classList.remove("has-art");
+    }
+  }
+}
+
+function updatePipTextScroll() {
+  const wrap = $("npMetaWrap");
+  const scroll = $("npMetaScroll");
+  if (!wrap || !scroll) return;
+  if (!document.body.classList.contains("pip")) {
+    wrap.classList.remove("auto-scroll-y");
+    wrap.style.removeProperty("--scroll-y");
+    return;
+  }
+  const diff = scroll.scrollHeight - wrap.clientHeight;
+  if (diff > 4) {
+    wrap.style.setProperty("--scroll-y", `-${diff + 6}px`);
+    wrap.classList.add("auto-scroll-y");
+  } else {
+    wrap.classList.remove("auto-scroll-y");
+    wrap.style.removeProperty("--scroll-y");
   }
 }
 
@@ -274,67 +667,280 @@ function setNpMeta(meta) {
   const revChanged = meta.rev !== npMeta.rev;
   npMeta = { title: meta.title || "", artist: meta.artist || "", album: meta.album || "",
     hasData: !!meta.hasData, rev: meta.rev };
-  $("npTitle").textContent = npMeta.hasData && npMeta.title ? npMeta.title : "Audio from your device";
-  let artistLine = "";
-  if (npMeta.hasData) {
-    artistLine = npMeta.artist || "";
-    if (npMeta.album) artistLine += artistLine ? " · " + npMeta.album : npMeta.album;
+  const titleEl = $("npTitle");
+  const albumEl = $("npAlbum");
+  const artistEl = $("npArtist");
+
+  if (titleEl) {
+    titleEl.textContent = npMeta.hasData && npMeta.title ? npMeta.title : "Audio from your device";
+    titleEl.title = titleEl.textContent;
   }
-  $("npArtist").textContent = artistLine || "Waiting for track info…";
-  // -md rewrites happen on every SETUP; art always clears to placeholder
-  // here and repaints only when the next nowplaying://art event lands
-  // (stale-art caveat from R1) — never assume the old art still matches.
-  setNpArt(null);
-  if (revChanged) resetNpProgress();
+
+  if (albumEl) {
+    if (npMeta.hasData && npMeta.album) {
+      albumEl.textContent = npMeta.album;
+      albumEl.title = npMeta.album;
+      albumEl.hidden = false;
+    } else {
+      albumEl.textContent = "";
+      albumEl.hidden = true;
+    }
+  }
+
+  if (artistEl) {
+    let artistLine = "";
+    if (npMeta.hasData) {
+      artistLine = npMeta.artist || "";
+    }
+    artistEl.textContent = artistLine || "Waiting for track info…";
+    artistEl.title = artistEl.textContent;
+  }
+
+  // -md rewrites happen on every SETUP; progress resets when track rev changes
+  // and cover art updates whenever nowplaying://art arrives.
+  if (revChanged) {
+    resetNpProgress();
+  }
   renderStage();
+  updatePipTextScroll();
+
+  if ('mediaSession' in navigator && window.MediaMetadata) {
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: npMeta.hasData && npMeta.title ? npMeta.title : "Audio from your device",
+        artist: npMeta.hasData && npMeta.artist ? npMeta.artist : "Mirr",
+        album: npMeta.hasData && npMeta.album ? npMeta.album : ""
+      });
+    } catch (_) {}
+  }
 }
 
 function updatePlayIcon(playing) {
   const path = playing
     ? '<path d="M8 6h3v12H8zM13 6h3v12h-3z"/>'
     : '<path d="M8 5v14l11-7Z"/>';
-  $("npPlayIcon").innerHTML = path;
-  $("mPlayIcon").innerHTML = path;
+  const label = playing ? "Pause" : "Play";
+  ["npPlay", "mPlay", "thPlay", "a2Play"].forEach(id => {
+    const el = $(id);
+    if (el) {
+      el.setAttribute("aria-label", label);
+      el.setAttribute("title", label);
+      const svg = el.querySelector("svg");
+      if (svg) svg.innerHTML = path;
+    }
+  });
+  if ($("npPlayIcon")) $("npPlayIcon").innerHTML = path;
+  if ($("mPlayIcon")) $("mPlayIcon").innerHTML = path;
+  if ($("thPlayIcon")) $("thPlayIcon").innerHTML = path;
+  if ($("a2PlayIcon")) $("a2PlayIcon").innerHTML = path;
+  if ('mediaSession' in navigator) {
+    try {
+      navigator.mediaSession.playbackState = playing ? "playing" : "paused";
+    } catch (_) {}
+  }
 }
 
-/* dacp_command failures are always quiet — a non-2xx just means the app on
-   the phone doesn't support this command, not an error worth a toast */
-function sendTransport(cmd) {
-  if (!TAURI) { toast("Demo mode — connect a real device for transport control"); return; }
-  invoke("dacp_command", { cmd }).then((code) => {
-    if (cmd === "playpause" && code >= 200 && code < 300) {
-      // fold the already-ticked time into the baseline first, otherwise a
-      // pause snaps the bar back to the last progress line (the phone
-      // re-baselines us shortly after anyway)
-      if (np.playing && np.baseSec != null)
-        np.baseSec = Math.min(np.durSec ?? Infinity, np.baseSec + (Date.now() - np.baseWall) / 1000);
-      np.playing = !np.playing;
+function toggleLocalPlayPause() {
+  if (np.playing && np.baseSec != null) {
+    np.baseSec = Math.min(np.durSec ?? Infinity, np.baseSec + (Date.now() - np.baseWall) / 1000);
+  }
+  np.playing = !np.playing;
+  np.baseWall = Date.now();
+  updatePlayIcon(np.playing);
+  renderNpProgress();
+}
+
+function stepDemoTrack(delta) {
+  if (delta < 0 && np.playing && np.baseSec != null) {
+    const elapsed = np.baseSec + (Date.now() - np.baseWall) / 1000;
+    if (elapsed > 3) {
+      setNpProgress(0, DEMO_PLAYLIST[demoTrackIdx].duration, 0);
+      updatePlayIcon(true);
+      return;
+    }
+  }
+  demoTrackIdx = (demoTrackIdx + delta + DEMO_PLAYLIST.length) % DEMO_PLAYLIST.length;
+  const t = DEMO_PLAYLIST[demoTrackIdx];
+  setNpMeta({ title: t.title, artist: t.artist, album: t.album, hasData: true, rev: Date.now() });
+  setNpArt(t.art || null);
+  setNpProgress(0, t.duration, 0);
+  updatePlayIcon(true);
+}
+
+/* Dispatch DACP commands (dacp_play_pause, dacp_next, dacp_prev) or media controls with graceful fallback */
+async function sendTransport(cmd) {
+  if (isDemoAudioActive) {
+    if (cmd === "playpause") toggleLocalPlayPause();
+    else if (cmd === "nextitem") stepDemoTrack(1);
+    else if (cmd === "previtem") stepDemoTrack(-1);
+    return;
+  }
+
+  const dacpCmdMap = {
+    playpause: "dacp_play_pause",
+    nextitem: "dacp_next",
+    previtem: "dacp_prev"
+  };
+
+  let dacpHandled = false;
+  if (TAURI) {
+    const directCmd = dacpCmdMap[cmd];
+    try {
+      let code;
+      if (directCmd) {
+        code = await invoke(directCmd).catch(() => invoke("dacp_command", { cmd }));
+      } else {
+        code = await invoke("dacp_command", { cmd });
+      }
+      if (typeof code === "number" && code >= 200 && code < 300) {
+        dacpHandled = true;
+      }
+    } catch (_) {
+      // quiet fallback when DACP endpoint not connected or returns error
+    }
+  }
+
+  if (cmd === "playpause") {
+    // Both on DACP success and as fallback when DACP is not active
+    toggleLocalPlayPause();
+  } else if (cmd === "nextitem") {
+    if (npActive && !dacpHandled) {
+      np.baseSec = 0;
       np.baseWall = Date.now();
-      updatePlayIcon(np.playing);
       renderNpProgress();
     }
-  }).catch(() => {});
+  } else if (cmd === "previtem") {
+    if (npActive && !dacpHandled) {
+      np.baseSec = 0;
+      np.baseWall = Date.now();
+      renderNpProgress();
+    }
+  }
 }
-["npPrev", "mPrev"].forEach(id => $(id).addEventListener("click", () => sendTransport("previtem")));
-["npNext", "mNext"].forEach(id => $(id).addEventListener("click", () => sendTransport("nextitem")));
-["npPlay", "mPlay"].forEach(id => $(id).addEventListener("click", () => sendTransport("playpause")));
+["npPrev", "mPrev", "thPrev", "a2Prev"].forEach(id => {
+  const el = $(id);
+  if (el) el.addEventListener("click", () => sendTransport("previtem"));
+});
+["npNext", "mNext", "thNext", "a2Next"].forEach(id => {
+  const el = $(id);
+  if (el) el.addEventListener("click", () => sendTransport("nextitem"));
+});
+["npPlay", "mPlay", "thPlay", "a2Play"].forEach(id => {
+  const el = $(id);
+  if (el) el.addEventListener("click", () => sendTransport("playpause"));
+});
 
+function updateTransportControlsVisibility() {
+  const show = !!runtimeSettings.showTransportControls;
+  if ($("thTransport")) $("thTransport").hidden = !show;
+  ["npPrev", "npPlay", "npNext"].forEach(id => {
+    const el = $(id);
+    if (el) el.hidden = !show;
+  });
+  ["mPrev", "mPlay", "mNext"].forEach(id => {
+    const el = $(id);
+    if (el) el.hidden = !show;
+  });
+  ["thPrev", "thPlay", "thNext"].forEach(id => {
+    const el = $(id);
+    if (el) el.hidden = !show;
+  });
+  ["a2Prev", "a2Play", "a2Next"].forEach(id => {
+    const el = $(id);
+    if (el) el.hidden = !show;
+  });
+}
+
+let currentVol = 70;
+let lastNonZeroVol = 70;
 let volDebounce = null;
+
+function updateVolUi(pct) {
+  pct = Math.round(Number(pct) || 0);
+  pct = Math.max(0, Math.min(100, pct));
+  currentVol = pct;
+  if (pct > 0) lastNonZeroVol = pct;
+
+  if ($("npVol") && Number($("npVol").value) !== pct) $("npVol").value = pct;
+  if ($("mVol") && Number($("mVol").value) !== pct) $("mVol").value = pct;
+  if ($("a2Vol") && Number($("a2Vol").value) !== pct) $("a2Vol").value = pct;
+  if ($("a2vol")) $("a2vol").textContent = pct + "%";
+
+  const iconSvg = pct === 0
+    ? '<path d="M4 9v6h4l5 5V4L8 9Z"/><line x1="17" y1="9" x2="23" y2="15"/><line x1="23" y1="9" x2="17" y2="15"/>'
+    : (pct < 50
+      ? '<path d="M4 9v6h4l5 5V4L8 9Z"/><path d="M16 9a5 5 0 0 1 0 6"/>'
+      : '<path d="M4 9v6h4l5 5V4L8 9Z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19 6a9 9 0 0 1 0 12"/>');
+
+  if ($("npVolIcon")) $("npVolIcon").innerHTML = iconSvg;
+  if ($("mVolIcon")) $("mVolIcon").innerHTML = iconSvg;
+  if ($("a2VolIcon")) $("a2VolIcon").innerHTML = iconSvg;
+}
+
 function sendVolume(pct) {
+  updateVolUi(pct);
   if (!TAURI) return;
   clearTimeout(volDebounce);
   volDebounce = setTimeout(() => {
+    invoke("audio_set_volume", { pct: Number(pct) }).catch(() => {});
     invoke("dacp_set_volume", { pct: Number(pct) }).catch(() => {});
-  }, 150);
+  }, 40);
 }
-$("npVol").addEventListener("input", (e) => { $("mVol").value = e.target.value; sendVolume(e.target.value); });
-$("mVol").addEventListener("input", (e) => { $("npVol").value = e.target.value; sendVolume(e.target.value); });
 
-/* media keys — trivial to wire, silent no-op when unsupported */
+function toggleMute() {
+  if (currentVol > 0) {
+    lastNonZeroVol = currentVol;
+    sendVolume(0);
+  } else {
+    sendVolume(lastNonZeroVol || 70);
+  }
+}
+
+if ($("npVol")) $("npVol").addEventListener("input", (e) => sendVolume(e.target.value));
+if ($("mVol")) $("mVol").addEventListener("input", (e) => sendVolume(e.target.value));
+if ($("a2Vol")) $("a2Vol").addEventListener("input", (e) => sendVolume(e.target.value));
+if ($("npVolBtn")) $("npVolBtn").addEventListener("click", toggleMute);
+if ($("mVolBtn")) $("mVolBtn").addEventListener("click", toggleMute);
+if ($("a2VolBtn")) $("a2VolBtn").addEventListener("click", toggleMute);
+
+if (TAURI) {
+  invoke("audio_get_volume").then((vol) => {
+    if (typeof vol === "number" && !isNaN(vol)) {
+      updateVolUi(vol);
+    }
+  }).catch(() => {});
+
+  if (listen) {
+    listen("audio://volume-changed", (e) => {
+      if (e.payload && typeof e.payload.volume === "number" && !isNaN(e.payload.volume)) {
+        updateVolUi(e.payload.volume);
+      }
+    });
+  }
+}
+
+/* media keys & system MediaSession — trivial to wire, silent no-op when unsupported */
+if ('mediaSession' in navigator) {
+  try {
+    navigator.mediaSession.setActionHandler('play', () => sendTransport("playpause"));
+    navigator.mediaSession.setActionHandler('pause', () => sendTransport("playpause"));
+    navigator.mediaSession.setActionHandler('previoustrack', () => sendTransport("previtem"));
+    navigator.mediaSession.setActionHandler('nexttrack', () => sendTransport("nextitem"));
+  } catch (_) {}
+}
 window.addEventListener("keydown", (e) => {
-  if (e.key === "MediaPlayPause" || e.key === "MediaPlay" || e.key === "MediaPause") sendTransport("playpause");
-  else if (e.key === "MediaTrackNext") sendTransport("nextitem");
-  else if (e.key === "MediaTrackPrevious") sendTransport("previtem");
+  if (e.key === "MediaPlayPause" || e.key === "MediaPlay" || e.key === "MediaPause") {
+    sendTransport("playpause");
+  } else if (e.key === "MediaTrackNext") {
+    sendTransport("nextitem");
+  } else if (e.key === "MediaTrackPrevious") {
+    sendTransport("previtem");
+  } else if ((e.key === " " || e.code === "Space") && !["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) {
+    if (npActive) {
+      e.preventDefault();
+      sendTransport("playpause");
+    }
+  }
 });
 
 /* enter/leave the live-mirror layout. `nextState` is the engine state to
@@ -348,19 +954,29 @@ function setMirroring(on, nextState, detail) {
   updateIdleBg(); // single source of truth: hidden / unfocused / mirroring
   if (on) {
     applyEngineState("mirroring");
+    if (runtimeSettings.autoTheater && !pipMode) {
+      setTheater(true);
+    }
+    if (TAURI && !pipMode && runtimeSettings.alwaysOnTopMirror) {
+      invoke("set_always_on_top", { on: true }).catch(() => {});
+    }
   } else {
-    document.body.classList.remove("theater");
+    setTheater(false);
     setZoom(100, true);
+    if (TAURI && !pipMode && runtimeSettings.alwaysOnTopMirror) {
+      invoke("set_always_on_top", { on: false }).catch(() => {});
+    }
     applyEngineState(nextState || "ready", detail);
   }
   renderStage();
   reportRectSoon();
+  refreshDevices();
 }
 
 /* --- rect reporting: keep the native video glued to #videoHost --- */
 let lastRect = "";
 function reportRect() {
-  if (!TAURI) return;
+  if (!TAURI || document.hidden) return;
   const dpr = window.devicePixelRatio || 1;
   let rect;
   if (document.body.classList.contains("theater")) {
@@ -387,8 +1003,11 @@ if (TAURI) {
   // the stage), 1 Hz otherwise — the idle ticks only exist to seed a target
   // rect before a session starts, and every tick is a forced layout read.
   let rectTick = 0;
-  setInterval(() => { if (mirroring || rectTick++ % 4 === 0) reportRect(); }, 250);
+  setInterval(() => { if (!document.hidden && (mirroring || rectTick++ % 4 === 0)) reportRect(); }, 250);
   window.addEventListener("resize", reportRectSoon);
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(reportRectSoon).observe($("videoHost"));
+  }
   document.querySelector(".stage").addEventListener("scroll", reportRect, { passive: true });
   reportRectSoon();
 }
@@ -396,23 +1015,207 @@ if (TAURI) {
 /* --- digital zoom --- */
 function setZoom(z, silent) {
   zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
-  $("zoomLbl").textContent = zoom + "%";
+  const lbl = zoom + "%";
+  $("zoomLbl").textContent = lbl;
+  $("thZoomLbl").textContent = lbl;
   if (!silent) reportRect();
 }
 $("zoomIn").addEventListener("click", () => setZoom(zoom + ZOOM_STEP));
 $("zoomOut").addEventListener("click", () => setZoom(zoom - ZOOM_STEP));
 $("zoomLbl").addEventListener("click", () => setZoom(100));
+$("thZoomIn").addEventListener("click", () => setZoom(zoom + ZOOM_STEP));
+$("thZoomOut").addEventListener("click", () => setZoom(zoom - ZOOM_STEP));
+$("thZoomLbl").addEventListener("click", () => setZoom(100));
 
-/* --- theater mode --- */
-$("theaterBtn").addEventListener("click", () => {
-  document.body.classList.toggle("theater");
+/* --- theater mode + auto-hiding floating HUD --- */
+let hudWakeTimer = null;
+function wakeTheaterHud() {
+  if (!document.body.classList.contains("theater")) return;
+  document.body.classList.add("hud-wake");
+  clearTimeout(hudWakeTimer);
+  hudWakeTimer = setTimeout(() => {
+    document.body.classList.remove("hud-wake");
+  }, 2400);
+}
+function setTheater(on) {
+  if (on && pipMode) setPipMode(false);
+  document.body.classList.toggle("theater", !!on);
+  if (on) wakeTheaterHud();
+  else {
+    clearTimeout(hudWakeTimer);
+    document.body.classList.remove("hud-wake");
+  }
   reportRectSoon();
+}
+$("theaterBtn").addEventListener("click", () => setTheater(!document.body.classList.contains("theater")));
+$("thExit").addEventListener("click", () => setTheater(false));
+window.addEventListener("pointermove", () => {
+  if (document.body.classList.contains("theater")) wakeTheaterHud();
+}, { passive: true });
+
+/* --- compact PiP mini-player mode --- */
+function setPipMode(on) {
+  pipMode = !!on;
+  if (pipMode && document.body.classList.contains("theater")) {
+    setTheater(false);
+  }
+  if (pipMode) {
+    nav(document.querySelector('[data-view="receive"]'));
+    $("diagPopover").hidden = true;
+    $("discoPill").setAttribute("aria-expanded", "false");
+  }
+  document.body.classList.toggle("pip", pipMode);
+  $("pipBtn").classList.toggle("on", pipMode);
+  updatePipTitle();
+  if (TAURI) {
+    invoke("set_pip_mode", {
+      pip: pipMode,
+      restoreAlwaysOnTop: !!(mirroring && runtimeSettings.alwaysOnTopMirror)
+    }).catch(() => {});
+  }
+  reportRectSoon();
+  setTimeout(updatePipTextScroll, 50);
+  setTimeout(updatePipTextScroll, 220);
+}
+$("pipBtn").addEventListener("click", () => setPipMode(!pipMode));
+$("pipExitBtn").addEventListener("click", () => setPipMode(false));
+
+if (window.ResizeObserver) {
+  const pipResizeObs = new ResizeObserver(() => {
+    if (pipMode) updatePipTextScroll();
+  });
+  if ($("npMetaWrap")) pipResizeObs.observe($("npMetaWrap"));
+  pipResizeObs.observe(document.body);
+} else {
+  window.addEventListener("resize", () => {
+    if (pipMode) updatePipTextScroll();
+  }, { passive: true });
+}
+
+/* --- slide-over spatial ecosystem drawer (Overhaul A) --- */
+let drawerOpen = false;
+let airplayDeviceCount = 0;
+
+function updateEcosystemBadge() {
+  const badge = $("drawerCountBadge");
+  if (!badge) return;
+  badge.textContent = String(airplayDeviceCount + peerCache.length);
+}
+
+function setDrawerOpen(open) {
+  drawerOpen = !!open;
+  const dr = $("spatialDrawer") || $("ecoDrawer");
+  const btn = $("drawerToggleBtn");
+  if (dr) dr.classList.toggle("closed", !drawerOpen);
+  if (btn) {
+    btn.classList.toggle("active", drawerOpen);
+    btn.setAttribute("aria-expanded", String(drawerOpen));
+  }
+  document.body.classList.toggle("drawer-open", drawerOpen);
+  reportRectSoon();
+}
+$("drawerToggleBtn").addEventListener("click", () => setDrawerOpen(!drawerOpen));
+$("drawerCloseBtn").addEventListener("click", () => setDrawerOpen(false));
+$("drawerOpenFolder").addEventListener("click", () => revealPath(null));
+$("drawerGoLocalSend").addEventListener("click", () => {
+  setDrawerOpen(false);
+  nav(document.querySelector('[data-view="localsend"]'));
 });
-window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && document.body.classList.contains("theater")) {
-    document.body.classList.remove("theater");
-    reportRectSoon();
+$("idleDropChip").addEventListener("click", () => {
+  nav(document.querySelector('[data-view="localsend"]'));
+});
+
+/* --- network & engine diagnostics popover --- */
+function updateSpatialMetaBadge(ipStr) {
+  const b = $("spatialMetaBadge");
+  if (!b) return;
+  const fpsTag = `${runtimeSettings.fps || 60}fps`;
+  const cleanIp = ipStr && ipStr !== "—" && ipStr !== "Unavailable" && ipStr !== "Detecting…" ? ipStr : "D3D11";
+  b.textContent = `${cleanIp} · ${fpsTag}`;
+}
+
+async function refreshDiagnostics() {
+  if (!TAURI) {
+    $("diagName").textContent = currentBroadcastName;
+    $("diagIp").textContent = "192.168.1.42";
+    const mode = runtimeSettings.fps === 30 ? "30fps Eco" : (runtimeSettings.vsync ? "60fps AV-Sync" : "60fps Low-Lat");
+    $("diagCodec").textContent = `H.264 D3D11 · ${mode}`;
+    $("diagLsPort").textContent = "53317 · HTTP/UDP";
+    updateSpatialMetaBadge("192.168.1.42");
     return;
+  }
+  try {
+    const d = await invoke("network_diagnostics");
+    if (!d) return;
+    $("diagName").textContent = d.broadcastName || currentBroadcastName;
+    $("diagIp").textContent = d.lanIp || "Unavailable";
+    const mode = d.fps === 30 ? "30fps Eco" : (d.vsync ? "60fps AV-Sync" : "60fps Low-Lat");
+    $("diagCodec").textContent = `${d.hwDecode || "H.264 D3D11"} · ${mode}`;
+    $("diagLsPort").textContent = `${d.localsendPort || 53317} · HTTP/UDP`;
+    updateSpatialMetaBadge(d.lanIp);
+  } catch (_) {}
+}
+$("discoPill").addEventListener("click", (e) => {
+  e.stopPropagation();
+  const nextHidden = !$("diagPopover").hidden;
+  $("diagPopover").hidden = nextHidden;
+  $("discoPill").setAttribute("aria-expanded", String(!nextHidden));
+  if (!nextHidden) refreshDiagnostics();
+});
+document.addEventListener("click", (e) => {
+  const pop = $("diagPopover");
+  if (!pop || pop.hidden) return;
+  if (!pop.contains(e.target) && !$("discoPill").contains(e.target)) {
+    pop.hidden = true;
+    $("discoPill").setAttribute("aria-expanded", "false");
+  }
+});
+$("diagCopyIp").addEventListener("click", () => {
+  const ip = $("diagIp").textContent || "";
+  if (navigator.clipboard && ip && ip !== "—" && ip !== "Unavailable") {
+    navigator.clipboard.writeText(ip).then(() => toast(`Copied ${ip}`));
+  } else {
+    toast("No LAN IP available to copy", true);
+  }
+});
+$("diagRestart").addEventListener("click", async () => {
+  $("diagPopover").hidden = true;
+  $("discoPill").setAttribute("aria-expanded", "false");
+  if (!TAURI) {
+    toast("Receiver restarted (demo)");
+    return;
+  }
+  applyEngineState("starting");
+  try {
+    await invoke("stop_airplay_receiver").catch(() => {});
+    await invoke("start_airplay_receiver");
+    toast("AirPlay receiver restarted");
+    refreshDiagnostics();
+  } catch (e) {
+    applyEngineState("error", String(e));
+    toast(String(e), true);
+  }
+});
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    if (!$("diagPopover").hidden) {
+      $("diagPopover").hidden = true;
+      $("discoPill").setAttribute("aria-expanded", "false");
+      return;
+    }
+    if (drawerOpen) {
+      setDrawerOpen(false);
+      return;
+    }
+    if (document.body.classList.contains("theater")) {
+      setTheater(false);
+      return;
+    }
+    if (pipMode) {
+      setPipMode(false);
+      return;
+    }
   }
   if (!mirroring) return;
   if (e.key === "+" || e.key === "=") setZoom(zoom + ZOOM_STEP);
@@ -444,8 +1247,12 @@ if (TAURI) {
     const on = !$("rxMirror").classList.contains("live");
     if (on) stopDemoNowPlaying(); // mirror wins — leave the Now Playing demo
     $("rxMirror").classList.toggle("live", on);
-    $("rxEmpty").classList.toggle("hide", on);
-    $("rxState").textContent = on ? "Connected · iPhone 16 Pro · 1080p60 · ~42 ms latency" : "Idle — demo";
+    setMirroring(on);
+    if (on) {
+      $("rxState").textContent = "Connected · AirPlay Mirror · 1080p60 · ~42 ms latency";
+    } else {
+      $("rxState").textContent = "Idle — demo";
+    }
     rxBtn.textContent = on ? "Disconnect" : "Simulate device connect";
     rxBtn.classList.toggle("danger", on);
     rxBtn.classList.toggle("primary", !on);
@@ -460,41 +1267,75 @@ if (TAURI) {
 
 function startDemoNowPlaying() {
   if ($("rxMirror").classList.contains("live")) return; // mirror wins
+  isDemoAudioActive = true;
   npActive = true;
   dacpAvailable = true;
-  setNpMeta({ title: DEMO_TRACK.title, artist: DEMO_TRACK.artist, album: DEMO_TRACK.album, hasData: true, rev: Date.now() });
-  setNpProgress(12, 222, 0);
+  const t = DEMO_PLAYLIST[demoTrackIdx];
+  setNpMeta({ title: t.title, artist: t.artist, album: t.album, hasData: true, rev: Date.now() });
+  setNpArt(t.art || null);
+  setNpProgress(12, t.duration, 0);
   updatePlayIcon(true);
   $("npDemoBtn").textContent = "Stop audio stream";
   renderStage();
 }
 function stopDemoNowPlaying() {
   if (!npActive) return;
+  isDemoAudioActive = false;
   npActive = false;
   dacpAvailable = false;
   resetNpProgress();
+  setNpArt(null);
   $("npDemoBtn").textContent = "Simulate audio stream";
   renderStage();
   $("rxState").textContent = "Idle — demo"; // same override loadDemo() uses
 }
 
 let lastDevicesJson = "";
+let refreshDevices = async () => {};
+
+function pickDeviceIcon(d) {
+  if (!d) return ICON.generic;
+  const str = `${d.type || ""} ${d.kind || ""} ${d.name || ""} ${d.meta || ""}`.toLowerCase();
+  if (str.includes("iphone") || str.includes("ios") || str.includes("apple device")) return ICON.iphone;
+  if (str.includes("ipad")) return ICON.ipad;
+  if (str.includes("mac")) return ICON.mac;
+  if (str.includes("android") || str.includes("pixel") || str.includes("galaxy")) return ICON.android;
+  if (str.includes("speaker") || str.includes("homepod") || str.includes("express") || str.includes("audio")) return ICON.speaker;
+  return ICON.generic;
+}
+
 function renderAirplayDevices(list) {
+  if (!Array.isArray(list)) list = [];
+  airplayDeviceCount = list.filter(d => d.online !== false).length;
+  updateEcosystemBadge();
   const json = JSON.stringify(list);
-  if (json === lastDevicesJson) return;
+  const targets = [
+    $("airplayDevices"),
+    $("rxDevices"),
+    $("rxDevicesMain"),
+    $("ecoPeers"),
+    document.querySelector('[data-alias="airplayDevices"]'),
+    document.querySelector('[data-alias="ecoPeers"]')
+  ].filter((el, idx, arr) => el && arr.indexOf(el) === idx);
+
+  const hasEmptyTarget = targets.some(t => !t.children.length);
+  if (json === lastDevicesJson && !hasEmptyTarget) return;
   lastDevicesJson = json;
-  const g = $("rxDevices"); g.innerHTML = "";
-  if (!list.length) {
-    g.innerHTML = `<div class="card tile"><div class="ic">${ICON.generic}</div><div class="name">Nothing seen yet</div>
-      <div class="meta">Apple devices on this network appear here</div></div>`;
-    return;
-  }
-  list.forEach(d => {
-    const el = document.createElement("div"); el.className = "card tile";
-    el.innerHTML = `<div class="ic">${pickIcon(d.type || d.name)}</div><div class="name">${esc(d.name)}</div>
-      <div class="meta">${esc(d.meta || "")}</div>
-      <div class="status"><span class="dot ${d.online ? "" : "off"}"></span>${d.online ? "On the network" : "Offline"}</div>`;
-    g.appendChild(el);
+
+  targets.forEach(g => {
+    g.innerHTML = "";
+    if (!list.length) {
+      g.innerHTML = `<div class="card tile"><div class="ic">${ICON.generic}</div><div style="flex:1"><div class="name">Nothing seen yet</div>
+        <div class="meta">Apple devices on this network appear here</div></div></div>`;
+      return;
+    }
+    list.forEach(d => {
+      const el = document.createElement("div"); el.className = "card tile";
+      el.innerHTML = `<div class="ic">${pickDeviceIcon(d)}</div>
+        <div style="flex:1;min-width:0"><div class="name">${esc(d.name)}</div><div class="meta">${esc(d.meta || "")}</div></div>
+        <div class="status"><span class="dot ${d.online ? "" : "off"}"></span>${d.online ? "Online" : "Offline"}</div>`;
+      g.appendChild(el);
+    });
   });
 }
 
@@ -503,6 +1344,7 @@ function renderAirplayDevices(list) {
    ============================================================ */
 function buildWave(id) {
   const w = $(id);
+  if (!w) return;
   for (let i = 0; i < 22; i++) {
     const b = document.createElement("i");
     b.style.animationDelay = (i * 0.06) + "s";
@@ -510,61 +1352,141 @@ function buildWave(id) {
     w.appendChild(b);
   }
 }
-buildWave("a2wave"); buildWave("castwave"); buildWave("npWave");
+buildWave("a2wave"); buildWave("castwave");
 
 /* ---------- AirPlay 2 ---------- */
-$("a2btn").addEventListener("click", function () {
-  if (TAURI) {
-    invoke("start_airplay2_receiver").then(
-      () => toast("AirPlay 2 engine started"),
-      (e) => toast(String(e), true)
-    );
-    return;
+let a2Running = true;
+let a2ActiveSession = false;
+
+function setA2RunningState(running) {
+  a2Running = running;
+  const btn = $("a2btn");
+  if (btn) {
+    btn.textContent = running ? "Stop AirPlay 2" : "Start AirPlay 2";
+    btn.className = running ? "btn" : "btn primary";
   }
-  const t = $("a2track"), s = $("a2sub"), w = $("a2wave");
-  if (t.textContent === "Nothing playing") {
-    t.textContent = DEMO_TRACK.title;
-    s.textContent = "From iPhone · ALAC 24-bit/48 kHz · 3 rooms in sync";
-    w.classList.add("on"); this.textContent = "Stop";
-  } else {
-    t.textContent = "Nothing playing";
-    s.textContent = "Waiting for an AirPlay 2 source · lossless ALAC up to 24-bit/48 kHz";
-    w.classList.remove("on"); this.textContent = "Simulate stream";
+  const st = $("a2status");
+  if (st) {
+    if (!running) {
+      st.textContent = "Engine Stopped";
+      st.className = "tag";
+    } else if (a2ActiveSession) {
+      st.textContent = "Streaming Lossless";
+      st.className = "tag good";
+    } else {
+      st.textContent = "Ready · " + (currentBroadcastName || "Mirr") + " Audio";
+      st.className = "tag good";
+    }
   }
-});
-if (TAURI) $("a2btn").textContent = "Start AirPlay 2 engine";
+  const mdnsTag = $("a2mdnsName");
+  if (mdnsTag) {
+    mdnsTag.textContent = (currentBroadcastName || "Mirr") + " Audio";
+  }
+}
+
+if ($("a2btn")) {
+  $("a2btn").addEventListener("click", function () {
+    if (TAURI) {
+      if (a2Running) {
+        invoke("stop_airplay2_receiver").then(
+          () => { setA2RunningState(false); toast("AirPlay 2 receiver stopped"); },
+          (e) => toast(String(e), true)
+        );
+      } else {
+        invoke("start_airplay2_receiver").then(
+          () => { setA2RunningState(true); toast("AirPlay 2 receiver started"); },
+          (e) => toast(String(e), true)
+        );
+      }
+      return;
+    }
+    const t = $("a2track"), s = $("a2sub"), w = $("a2wave");
+    if (t.textContent === "Nothing playing") {
+      t.textContent = DEMO_TRACK.title;
+      s.textContent = "From iPhone · Lossless 44.1 kHz PCM";
+      if (w) w.classList.add("on"); this.textContent = "Stop";
+    } else {
+      t.textContent = "Nothing playing";
+      s.textContent = "Waiting for an AirPlay 2 source · 44.1 kHz 16-bit PCM";
+      if (w) w.classList.remove("on"); this.textContent = "Simulate stream";
+    }
+  });
+}
 
 const roomCache = {};
 function renderRooms(targetId, list, onToggle) {
+  const rc = $(targetId);
+  if (!rc) return;
   const json = JSON.stringify(list);
   if (roomCache[targetId] === json) return;
   roomCache[targetId] = json;
-  const rc = $(targetId); rc.innerHTML = "";
-  list.forEach(r => {
+  rc.innerHTML = "";
+  (list || []).forEach(r => {
     const el = document.createElement("div"); el.className = "room tile";
     el.innerHTML = `<div class="ricon">${ICON.speaker}</div>
       <div class="st" style="flex:1"><div class="rname">${esc(r.name)}</div><div class="rmeta">${esc(r.meta || "")}</div></div>
-      <div class="slider" style="max-width:120px"><input type="range" min="0" max="100" value="${Number(r.vol ?? 60)}"></div>
-      <div class="switch ${r.on ? "on" : ""}"></div>`;
+      <div class="slider" style="max-width:120px"><input type="range" min="0" max="100" value="${Number(r.vol ?? 60)}" aria-label="Speaker volume"></div>
+      <div class="switch ${r.on ? "on" : ""}" role="switch" aria-checked="${r.on ? "true" : "false"}"></div>`;
     const sw = el.querySelector(".switch");
     sw.addEventListener("click", () => {
-      sw.classList.toggle("on");
-      if (sw.classList.contains("on") && onToggle) onToggle(r);
+      const nextOn = !sw.classList.contains("on");
+      sw.classList.toggle("on", nextOn);
+      sw.setAttribute("aria-checked", String(nextOn));
+      r.on = nextOn;
+      if (onToggle) onToggle(r, sw, nextOn);
     });
     rc.appendChild(el);
   });
 }
 
 /* ---------- AirCast ---------- */
+function syncCastWave() {
+  const anyOn = !!$("rooms").querySelector(".switch.on") || $("castPlay").textContent === "⏸ Streaming";
+  $("castwave").classList.toggle("on", anyOn);
+  $("castPlay").textContent = anyOn ? "⏸ Streaming" : "▶ Stream";
+}
 $("castPlay").addEventListener("click", function () {
-  if (TAURI) { toast("Pick a speaker below to start casting"); return; }
-  this.textContent = this.textContent === "▶ Stream" ? "⏸ Streaming" : "▶ Stream";
+  if (TAURI) {
+    const activeSw = $("rooms").querySelector(".switch.on");
+    if (activeSw) {
+      activeSw.click();
+    } else {
+      toast("Pick a speaker below to start casting");
+    }
+    return;
+  }
+  const streaming = this.textContent !== "⏸ Streaming";
+  this.textContent = streaming ? "⏸ Streaming" : "▶ Stream";
+  $("castwave").classList.toggle("on", streaming);
 });
-function castTo(target) {
-  if (!TAURI) return;
+function castTo(target, sw, nextOn = true) {
+  if (!TAURI) { syncCastWave(); return; }
+  if (!nextOn) {
+    if (!$("rooms").querySelector(".switch.on")) {
+      invoke("stop_aircast").catch(() => {});
+    }
+    syncCastWave();
+    return;
+  }
+  // single-target sidecar: uncheck any previously active speaker switch
+  $("rooms").querySelectorAll(".switch.on").forEach(other => {
+    if (other !== sw) {
+      other.classList.remove("on");
+      other.setAttribute("aria-checked", "false");
+    }
+  });
+  syncCastWave();
   invoke("start_aircast", { targetIp: target.addr || "" }).then(
     () => toast(`Casting to ${target.name}`),
-    (e) => toast(String(e), true)
+    (e) => {
+      if (sw) {
+        sw.classList.remove("on");
+        sw.setAttribute("aria-checked", "false");
+      }
+      target.on = false;
+      syncCastWave();
+      toast(String(e), true);
+    }
   );
 }
 
@@ -575,41 +1497,55 @@ let peerCache = [];
 let selectedPeer = null;
 let lastPeersJson = "";
 
-function renderPeers(list) {
-  // The backend re-emits the whole peer list on every LocalSend announce, and
-  // every device on the LAN announces on its own timer — so without a guard
-  // this rebuilds N rows (innerHTML parse + 2N listeners) every few seconds
-  // forever, driven by other people's traffic, and silently drops the .sel
-  // highlight while the user is looking at it. Same dedupe as
-  // renderAirplayDevices/renderRooms. Cache and selection are refreshed first
-  // so the early return only ever skips DOM work, never state.
-  const json = JSON.stringify(list);
-  peerCache = list;
-  if (selectedPeer && !list.some(p => p.fingerprint === selectedPeer.fingerprint)) selectedPeer = null;
-  if (json === lastPeersJson) return;
-  lastPeersJson = json;
-  const pl = $("lsPeers"); pl.innerHTML = "";
+function selectPeer(peer) {
+  selectedPeer = peer || null;
+  ["lsPeers", "drawerPeers", "discoPeers"].forEach(id => {
+    const pl = $(id);
+    if (pl) {
+      pl.querySelectorAll(".peer-row").forEach(r => {
+        r.classList.toggle("sel", !!(selectedPeer && r.dataset.fp === selectedPeer.fingerprint));
+      });
+    }
+  });
+  $("dropHint").textContent = selectedPeer ? `sends to ${selectedPeer.alias}` : "or pick a device from the list";
+}
+
+function populatePeerContainer(container, list) {
+  if (!container) return;
+  container.innerHTML = "";
   if (!list.length) {
-    pl.innerHTML = `<div class="peer-row tile"><div class="pic">${ICON.generic}</div><div><div class="pn">No devices yet</div><div class="pm">Open LocalSend on another device on this network</div></div></div>`;
-    $("lsScan").textContent = "· scanning…";
+    container.innerHTML = `<div class="peer-row tile"><div class="pic">${ICON.generic}</div><div><div class="pn">No devices yet</div><div class="pm">Open LocalSend on another device on this network</div></div></div>`;
     return;
   }
-  $("lsScan").textContent = `· ${list.length} nearby`;
   list.forEach(p => {
     const el = document.createElement("div"); el.className = "peer-row tile";
+    el.dataset.fp = p.fingerprint || "";
     if (selectedPeer && selectedPeer.fingerprint === p.fingerprint) el.classList.add("sel");
     el.innerHTML = `<div class="pic">${pickIcon(p.type || p.model || p.alias)}</div>
-      <div style="flex:1"><div class="pn">${esc(p.alias)}</div><div class="pm">${esc(p.model || "")}</div></div>
-      <button class="btn">Send</button>`;
+      <div style="flex:1;min-width:0"><div class="pn">${esc(p.alias)}</div><div class="pm">${esc(p.model || "")}</div></div>
+      <button class="btn sm" type="button">Send</button>`;
     el.querySelector("button").addEventListener("click", e => { e.stopPropagation(); pickAndSend(p); });
-    el.addEventListener("click", () => {
-      selectedPeer = p;
-      pl.querySelectorAll(".peer-row").forEach(r => r.classList.remove("sel"));
-      el.classList.add("sel");
-      $("dropHint").textContent = `sends to ${p.alias}`;
-    });
-    pl.appendChild(el);
+    el.addEventListener("click", () => selectPeer(p));
+    container.appendChild(el);
   });
+}
+
+function renderPeers(list) {
+  const json = JSON.stringify(list);
+  peerCache = list;
+  updateEcosystemBadge();
+  if (selectedPeer && !list.some(p => p.fingerprint === selectedPeer.fingerprint)) {
+    selectPeer(null);
+  }
+  if (json === lastPeersJson) return;
+  lastPeersJson = json;
+  populatePeerContainer($("lsPeers"), list);
+  populatePeerContainer($("drawerPeers"), list);
+  const disco = $("discoPeers");
+  if (disco && disco !== $("drawerPeers") && disco !== $("lsPeers")) {
+    populatePeerContainer(disco, list);
+  }
+  $("lsScan").textContent = list.length ? `· ${list.length} nearby` : "· scanning…";
 }
 
 function showTransfer(name, dev, busy) {
@@ -630,11 +1566,64 @@ function finishTransfer(ok, msg) {
 
 const basename = (p) => String(p).split(/[\\/]/).pop();
 
+/* --- LocalSend recent transfer history --- */
+const transferHistory = [];
+function fmtClock(d) {
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+function revealPath(path) {
+  if (!TAURI) {
+    toast(path ? `Would reveal ${basename(path)} in Explorer` : "Would open Downloads folder in Explorer");
+    return;
+  }
+  invoke("reveal_in_explorer", { path: path || null }).catch((e) => toast(String(e), true));
+}
+$("lsOpenFolder").addEventListener("click", () => revealPath(null));
+
+function recordTransferHistory({ dir, name, peer, path }) {
+  transferHistory.unshift({
+    dir: dir === "in" ? "in" : "out",
+    name: name || (path ? basename(path) : "file"),
+    peer: peer || "Device",
+    path: path || null,
+    time: fmtClock(new Date())
+  });
+  if (transferHistory.length > 8) transferHistory.length = 8;
+  renderTransferHistory();
+}
+
+function renderTransferHistory() {
+  const wrap = $("lsHistoryWrap"), list = $("lsHistory");
+  if (!wrap || !list) return;
+  if (!transferHistory.length) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  list.innerHTML = "";
+  transferHistory.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "hist-row";
+    const arrow = item.dir === "in" ? "↓" : "↑";
+    const dirLabel = item.dir === "in" ? `From ${item.peer}` : `To ${item.peer}`;
+    row.innerHTML = `<div class="hist-dir ${item.dir}" title="${item.dir === "in" ? "Received" : "Sent"}">${arrow}</div>
+      <div class="hist-info">
+        <div class="hist-name">${esc(item.name)}</div>
+        <div class="hist-meta">${esc(dirLabel)} · ${esc(item.time)}</div>
+      </div>
+      <button class="btn ghost sm" type="button">${item.path ? "Reveal" : "Folder"}</button>`;
+    row.querySelector("button").addEventListener("click", () => revealPath(item.path));
+    list.appendChild(row);
+  });
+}
+
 async function sendPath(peer, path) {
-  showTransfer(basename(path), peer.alias, true);
+  const name = basename(path);
+  showTransfer(name, peer.alias, true);
   try {
     await invoke("localsend_send", { targetIp: peer.ip, port: peer.port, path });
     finishTransfer(true);
+    recordTransferHistory({ dir: "out", name, peer: peer.alias, path });
     return true;
   } catch (e) {
     finishTransfer(false, String(e));
@@ -643,7 +1632,7 @@ async function sendPath(peer, path) {
 }
 
 async function pickAndSend(peer) {
-  selectedPeer = peer;
+  selectPeer(peer);
   if (!TAURI) { fakeTransfer(peer.alias); return; }
   const file = await window.__TAURI__.dialog.open({ multiple: false, title: "Send a file with LocalSend" }).catch(() => null);
   if (!file) return;
@@ -652,36 +1641,88 @@ async function pickAndSend(peer) {
 
 function fakeTransfer(dev) {
   const names = ["photo.heic", "presentation.pdf", "clip.mov", "design.fig", "notes.md"];
-  showTransfer(names[Math.floor(Math.random() * names.length)], dev, false);
+  const picked = names[Math.floor(Math.random() * names.length)];
+  showTransfer(picked, dev, false);
   const bar = $("tfBar"), pct = $("tfPct");
   let p = 0;
   const iv = setInterval(() => {
     p += Math.random() * 9 + 3;
-    if (p >= 100) { p = 100; clearInterval(iv); pct.textContent = "✓ Delivered"; }
+    if (p >= 100) {
+      p = 100;
+      clearInterval(iv);
+      pct.textContent = "✓ Delivered";
+      recordTransferHistory({ dir: "out", name: picked, peer: dev, path: null });
+    }
     bar.style.width = p + "%";
     if (p < 100) pct.textContent = "Sending… " + Math.floor(p) + "%";
   }, 160);
 }
 
-/* drop zone — Tauri delivers real paths via its drag-drop event.
-   Drops only count on the LocalSend view, and only with a clear target
-   (the selected peer, or the single peer when there is exactly one). */
+/* drop zone + whole-window drag-and-drop overlay */
 const drop = $("drop");
+const dropOverlay = $("dropOverlay");
+function updateDropOverlayHint() {
+  const peer = selectedPeer || (peerCache.length === 1 ? peerCache[0] : null);
+  $("dropOverlaySub").textContent = peer
+    ? `Release to send directly to ${peer.alias}`
+    : "Release to switch to LocalSend and send to your selected device";
+}
+function showDropOverlay(on) {
+  if (!dropOverlay) return;
+  if (on) updateDropOverlayHint();
+  dropOverlay.classList.toggle("show", !!on);
+}
+
+let browserDragDepth = 0;
+window.addEventListener("dragenter", (e) => {
+  if (TAURI) return;
+  e.preventDefault();
+  browserDragDepth++;
+  showDropOverlay(true);
+});
+window.addEventListener("dragover", (e) => {
+  e.preventDefault();
+});
+window.addEventListener("dragleave", () => {
+  if (TAURI) return;
+  browserDragDepth = Math.max(0, browserDragDepth - 1);
+  if (browserDragDepth === 0) showDropOverlay(false);
+});
+window.addEventListener("drop", (e) => {
+  if (TAURI) return;
+  e.preventDefault();
+  browserDragDepth = 0;
+  showDropOverlay(false);
+  drop.classList.remove("hot");
+  nav(document.querySelector('[data-view="localsend"]'));
+  const peer = selectedPeer || (peerCache.length === 1 ? peerCache[0] : null);
+  fakeTransfer((peer && peer.alias) || "LocalSend Device");
+});
+
 drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("hot"); });
 drop.addEventListener("dragleave", () => drop.classList.remove("hot"));
 drop.addEventListener("drop", e => {
-  e.preventDefault(); drop.classList.remove("hot");
-  if (!TAURI) fakeTransfer((selectedPeer && selectedPeer.alias) || "the selected device");
+  e.preventDefault();
+  drop.classList.remove("hot");
+  showDropOverlay(false);
 });
 if (listen) {
-  const onLocalsendView = () => $("localsend").classList.contains("show");
-  listen("tauri://drag-enter", () => { if (onLocalsendView()) drop.classList.add("hot"); });
-  listen("tauri://drag-leave", () => drop.classList.remove("hot"));
+  listen("tauri://drag-enter", () => {
+    drop.classList.add("hot");
+    showDropOverlay(true);
+  });
+  listen("tauri://drag-leave", () => {
+    drop.classList.remove("hot");
+    showDropOverlay(false);
+  });
   listen("tauri://drag-drop", async (e) => {
     drop.classList.remove("hot");
-    if (!onLocalsendView()) return;
+    showDropOverlay(false);
     const paths = (e.payload && e.payload.paths) || [];
     if (!paths.length) return;
+    if (!$("localsend").classList.contains("show")) {
+      nav(document.querySelector('[data-view="localsend"]'));
+    }
     const peer = selectedPeer || (peerCache.length === 1 ? peerCache[0] : null);
     if (!peer) { toast("Pick a device first — click one in the list", true); return; }
     for (const p of paths) {
@@ -691,16 +1732,284 @@ if (listen) {
 }
 
 /* ============================================================
+   Interactive Runtime Settings
+   ============================================================ */
+let availableAudioDevices = [];
+
+async function refreshAudioDevicesList() {
+  if (!TAURI) {
+    availableAudioDevices = [
+      { id: "default", name: "System Default", isDefault: true },
+      { id: "mock-1", name: "Headphones (AirPods Pro)", isDefault: true },
+      { id: "mock-2", name: "Speakers (Realtek Audio)", isDefault: false }
+    ];
+    renderAudioDeviceOptions();
+    return;
+  }
+  try {
+    const list = await invoke("list_audio_devices").catch(() => []);
+    availableAudioDevices = list || [];
+    renderAudioDeviceOptions();
+  } catch (e) {
+    console.warn("Failed to list audio devices:", e);
+  }
+}
+
+function renderAudioDeviceOptions() {
+  const sel = $("setAudioOutputSelect");
+  if (!sel) return;
+  const currentVal = runtimeSettings.audioOutputDevice || "default";
+  sel.innerHTML = "";
+
+  const defDev = availableAudioDevices.find(d => d.isDefault);
+  const defLabel = defDev ? `Windows Default (${defDev.name})` : "Windows Default";
+  const defOpt = document.createElement("option");
+  defOpt.value = "default";
+  defOpt.textContent = defLabel;
+  sel.appendChild(defOpt);
+
+  availableAudioDevices.forEach((d) => {
+    const opt = document.createElement("option");
+    opt.value = d.id;
+    opt.textContent = d.name + (d.isDefault ? " [Default]" : "");
+    sel.appendChild(opt);
+  });
+
+  sel.value = currentVal;
+  if (!sel.value) sel.value = "default";
+}
+
+function syncSettingsUI() {
+  const inp = $("setBroadcastInput");
+  if (inp) inp.value = runtimeSettings.broadcastName || currentBroadcastName;
+  $("setName").textContent = runtimeSettings.broadcastName || currentBroadcastName;
+  const presetKey = runtimeSettings.fps === 30 ? "30-eco" : (runtimeSettings.vsync ? "60-sync" : "60-low");
+  document.querySelectorAll("#setPresetGroup .seg-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.preset === presetKey);
+  });
+  const recMode = runtimeSettings.receiverMode || "dual";
+  document.querySelectorAll("#setReceiverModeGroup .seg-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.mode === recMode);
+  });
+  const aot = $("setAlwaysOnTop");
+  if (aot) {
+    aot.classList.toggle("on", !!runtimeSettings.alwaysOnTopMirror);
+    aot.setAttribute("aria-checked", String(!!runtimeSettings.alwaysOnTopMirror));
+  }
+  const ath = $("setAutoTheater");
+  if (ath) {
+    ath.classList.toggle("on", !!runtimeSettings.autoTheater);
+    ath.setAttribute("aria-checked", String(!!runtimeSettings.autoTheater));
+  }
+  const asw = $("setAutoSwitchAudio");
+  if (asw) {
+    const on = runtimeSettings.autoSwitchAudioOutput !== false;
+    asw.classList.toggle("on", on);
+    asw.setAttribute("aria-checked", String(on));
+  }
+  const audSel = $("setAudioOutputSelect");
+  if (audSel) {
+    audSel.value = runtimeSettings.audioOutputDevice || "default";
+  }
+  const stc = $("setShowTransportControls");
+  if (stc) {
+    const on = !!runtimeSettings.showTransportControls;
+    stc.classList.toggle("on", on);
+    stc.setAttribute("aria-checked", String(on));
+  }
+  updateTransportControlsVisibility();
+  applyTheme(runtimeSettings.bgTheme || "horizon");
+  refreshDiagnostics();
+}
+
+async function persistSettings(restartReceiver = false) {
+  currentBroadcastName = runtimeSettings.broadcastName || "Mirr";
+  syncSettingsUI();
+  if ($("receive").classList.contains("show")) {
+    $("vsub").textContent = `Your PC appears as “${currentBroadcastName}”`;
+  }
+  if (!mirroring && !npActive && engineState === "ready") {
+    applyEngineState("ready");
+  } else {
+    updatePipTitle();
+  }
+  try {
+    localStorage.setItem("mirr_settings", JSON.stringify(runtimeSettings));
+  } catch (_) {}
+
+  if (!TAURI) {
+    toast(restartReceiver ? `Saved & updated broadcast as “${currentBroadcastName}”` : "Preferences updated");
+    return;
+  }
+  try {
+    await invoke("update_settings", {
+      config: {
+        broadcastName: runtimeSettings.broadcastName,
+        fps: runtimeSettings.fps,
+        vsync: runtimeSettings.vsync,
+        alwaysOnTopMirror: runtimeSettings.alwaysOnTopMirror,
+        autoTheater: runtimeSettings.autoTheater,
+        audioOutputDevice: runtimeSettings.audioOutputDevice || "default",
+        autoSwitchAudioOutput: runtimeSettings.autoSwitchAudioOutput !== false,
+        showTransportControls: !!runtimeSettings.showTransportControls,
+        receiverMode: runtimeSettings.receiverMode || "dual"
+      },
+      broadcastName: runtimeSettings.broadcastName,
+      fps: runtimeSettings.fps,
+      vsync: runtimeSettings.vsync,
+      alwaysOnTopMirror: runtimeSettings.alwaysOnTopMirror,
+      autoTheater: runtimeSettings.autoTheater,
+      audioOutputDevice: runtimeSettings.audioOutputDevice || "default",
+      autoSwitchAudioOutput: runtimeSettings.autoSwitchAudioOutput !== false,
+      showTransportControls: !!runtimeSettings.showTransportControls,
+      receiverMode: runtimeSettings.receiverMode || "dual",
+      restartReceiver: !!restartReceiver
+    });
+    if (mirroring && !pipMode) {
+      invoke("set_always_on_top", { on: !!runtimeSettings.alwaysOnTopMirror }).catch(() => {});
+    }
+    if (restartReceiver && engineState !== "stopped") {
+      applyEngineState("starting");
+      await invoke("stop_airplay_receiver").catch(() => {});
+      await invoke("start_airplay_receiver");
+      toast(`Receiver restarted (${runtimeSettings.fps} fps)`);
+    } else {
+      toast("Settings saved");
+    }
+  } catch (e) {
+    toast(String(e), true);
+  }
+}
+
+document.querySelectorAll("#themeGrid .theme-card").forEach((card) => {
+  const pick = () => {
+    const t = card.dataset.theme;
+    if (t) {
+      applyTheme(t);
+      persistSettings(false);
+      const nameEl = card.querySelector(".theme-card-name");
+      toast(`Theme set to ${nameEl ? nameEl.textContent : t}`);
+    }
+  };
+  card.addEventListener("click", pick);
+  card.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      pick();
+    }
+  });
+});
+
+$("setSaveName").addEventListener("click", () => {
+  const raw = ($("setBroadcastInput").value || "").trim();
+  if (!raw) {
+    toast("Broadcast name cannot be empty", true);
+    return;
+  }
+  runtimeSettings.broadcastName = raw;
+  persistSettings(true);
+});
+$("setBroadcastInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") $("setSaveName").click();
+});
+document.querySelectorAll("#setPresetGroup .seg-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const p = btn.dataset.preset;
+    if (p === "30-eco") { runtimeSettings.fps = 30; runtimeSettings.vsync = false; }
+    else if (p === "60-sync") { runtimeSettings.fps = 60; runtimeSettings.vsync = true; }
+    else { runtimeSettings.fps = 60; runtimeSettings.vsync = false; }
+    persistSettings(true);
+  });
+});
+document.querySelectorAll("#setReceiverModeGroup .seg-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const m = btn.dataset.mode;
+    if (m) {
+      runtimeSettings.receiverMode = m;
+      persistSettings(true);
+      toast(`Receiver Mode: ${btn.textContent.trim()}`);
+    }
+  });
+});
+["setAlwaysOnTop", "setAutoTheater", "setAutoSwitchAudio", "setShowTransportControls"].forEach((id) => {
+  const sw = $(id);
+  if (!sw) return;
+  const toggle = () => {
+    const next = !sw.classList.contains("on");
+    if (id === "setAlwaysOnTop") runtimeSettings.alwaysOnTopMirror = next;
+    else if (id === "setAutoTheater") runtimeSettings.autoTheater = next;
+    else if (id === "setAutoSwitchAudio") {
+      runtimeSettings.autoSwitchAudioOutput = next;
+      toast(next ? "Auto-switch to new sound output enabled" : "Auto-switch to new sound output disabled");
+    } else if (id === "setShowTransportControls") {
+      runtimeSettings.showTransportControls = next;
+      updateTransportControlsVisibility();
+      toast(next ? "Transport controls enabled" : "Transport controls hidden");
+    }
+    persistSettings(false);
+  };
+  sw.addEventListener("click", toggle);
+  sw.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+  });
+});
+
+const audioSelect = $("setAudioOutputSelect");
+if (audioSelect) {
+  audioSelect.addEventListener("change", () => {
+    runtimeSettings.audioOutputDevice = audioSelect.value || "default";
+    persistSettings(true);
+    const chosenName = audioSelect.options[audioSelect.selectedIndex]?.text || "Device";
+    toast(`Sound output set to: ${chosenName}`);
+  });
+}
+
+const refreshAudioBtn = $("setRefreshAudioBtn");
+if (refreshAudioBtn) {
+  refreshAudioBtn.addEventListener("click", async () => {
+    await refreshAudioDevicesList();
+    toast("Audio devices refreshed");
+  });
+}
+
+/* ============================================================
    backend bridge
    ============================================================ */
 async function loadFromBackend() {
   applyEngineState("starting");
   try {
+    try {
+      const cached = JSON.parse(localStorage.getItem("mirr_settings") || "null");
+      if (cached && typeof cached === "object") {
+        runtimeSettings = { ...runtimeSettings, ...cached };
+      }
+    } catch (_) {}
     const name = await invoke("device_name");
-    $("setName").textContent = name;
+    currentBroadcastName = name || "Mirr";
+    runtimeSettings.broadcastName = currentBroadcastName;
+    const saved = await invoke("get_settings").catch(() => null);
+    if (saved) {
+      runtimeSettings = {
+        ...runtimeSettings,
+        broadcastName: saved.broadcastName || currentBroadcastName,
+        fps: Number(saved.fps) || 60,
+        vsync: !!saved.vsync,
+        alwaysOnTopMirror: !!saved.alwaysOnTopMirror,
+        autoTheater: !!saved.autoTheater,
+        audioOutputDevice: saved.audioOutputDevice || "default",
+        autoSwitchAudioOutput: saved.autoSwitchAudioOutput !== false,
+        // REMINDER: Default showTransportControls to false on initial setup of the app
+        showTransportControls: saved.showTransportControls === true
+      };
+      currentBroadcastName = runtimeSettings.broadcastName;
+    }
+    updateTransportControlsVisibility();
+    await refreshAudioDevicesList();
+    applyTheme(runtimeSettings.bgTheme || "horizon");
+    syncSettingsUI();
     $("rxEngineTag").textContent = "· mDNS live";
 
-    const refreshDevices = async () => {
+    refreshDevices = async () => {
       const ap = await invoke("list_airplay_devices").catch(() => []);
       renderAirplayDevices(ap);
     };
@@ -714,6 +2023,9 @@ async function loadFromBackend() {
     setInterval(() => { if (!document.hidden) refreshDevices(); }, 5000);
     setInterval(() => { if (!document.hidden) refreshTargets(); }, 8000);
 
+    // Live backend discovery events
+    await listen("airplay://devices", (e) => renderAirplayDevices(e.payload || []));
+
     // Listener first, then snapshot: a peer registering in the gap between the
     // snapshot and the listener attaching would be missed, and since
     // localsend.rs only emits on change, that peer's next (identical)
@@ -721,7 +2033,43 @@ async function loadFromBackend() {
     // change-guard, so the resulting duplicate render from the snapshot is free.
     await listen("localsend://peers", (e) => renderPeers(e.payload || []));
     renderPeers(await invoke("list_localsend_peers").catch(() => []));
-    listen("localsend://received", (e) => toast("Received " + basename((e.payload || {}).path || "a file")));
+    listen("localsend://received", (e) => {
+      const p = e.payload || {};
+      const fname = p.name || basename(p.path || "a file");
+      recordTransferHistory({
+        dir: "in",
+        name: fname,
+        peer: p.from || "LocalSend peer",
+        path: p.path || null
+      });
+      toast("Received " + fname, false, "Show in folder", () => revealPath(p.path || null));
+    });
+
+    // Windows audio output change & auto-switch events
+    listen("audio://default-changed", (e) => {
+      const payload = e.payload || {};
+      if (payload.devices) {
+        availableAudioDevices = payload.devices;
+        renderAudioDeviceOptions();
+      }
+      if (payload.device && payload.autoSwitched) {
+        toast(`Sound output switched to: ${payload.device.name}`);
+      }
+    });
+    listen("audio://device-switched", (e) => {
+      const payload = e.payload || {};
+      if (payload.device) {
+        toast(`Sound output switched to: ${payload.device.name}`);
+        renderAudioDeviceOptions();
+      }
+    });
+    listen("audio://devices-changed", (e) => {
+      const payload = e.payload || {};
+      if (payload.devices) {
+        availableAudioDevices = payload.devices;
+        renderAudioDeviceOptions();
+      }
+    });
 
     // engine + mirror lifecycle
     listen("airplay://status", (e) => {
@@ -753,12 +2101,17 @@ async function loadFromBackend() {
         engineDetail = "";
         syncRxButton();
       }
+      refreshDevices();
     });
     listen("mirror://started", () => {
       nav(document.querySelector('[data-view=receive]'));
       setMirroring(true);
+      refreshDevices();
     });
-    listen("mirror://ended", () => { if (mirroring) setMirroring(false); });
+    listen("mirror://ended", () => {
+      if (mirroring) setMirroring(false);
+      refreshDevices();
+    });
     // engine found a video window before we ever reported a dockable rect
     // (deep-linked into another view) — surface the receive stage so it docks
     listen("mirror://detected", () => {
@@ -768,14 +2121,20 @@ async function loadFromBackend() {
     // audio-only Now Playing lifecycle (mirror wins by construction, both
     // here and in the backend FSM which deactivates NP on usingScreen=1)
     listen("nowplaying://session", (e) => {
+      isDemoAudioActive = false;
       npActive = !!(e.payload && e.payload.active);
       if (npActive) {
-        nav(document.querySelector('[data-view=receive]'));
+        const cur = document.querySelector('.view.show');
+        if (!cur || (cur.id !== 'airplay2' && cur.id !== 'receive')) {
+          nav(document.querySelector('[data-view=receive]'));
+        }
       } else {
         setNpMeta({});
         resetNpProgress();
+        setNpArt(null);
       }
       renderStage();
+      refreshDevices();
     });
     listen("nowplaying://meta", (e) => setNpMeta(e.payload || {}));
     listen("nowplaying://art", (e) => setNpArt((e.payload && e.payload.dataUrl) || null));
@@ -787,6 +2146,127 @@ async function loadFromBackend() {
       dacpAvailable = !!(e.payload && e.payload.available);
       renderStage();
     });
+
+    // AirPlay 2 native session events
+    listen("airplay2://status", (e) => {
+      const p = e.payload || {};
+      if (p.state === "streaming") {
+        a2ActiveSession = true;
+        if ($("a2status")) {
+          $("a2status").textContent = "Streaming Lossless";
+          $("a2status").className = "tag good";
+        }
+        if ($("a2wave")) $("a2wave").classList.add("on");
+      } else if (p.state === "ready") {
+        a2ActiveSession = false;
+        setA2RunningState(true);
+      } else if (p.state === "stopped") {
+        a2ActiveSession = false;
+        setA2RunningState(false);
+      } else if (p.state === "error") {
+        toast("AirPlay 2 error: " + (p.detail || ""), true);
+      }
+    });
+
+    listen("airplay2://session", (e) => {
+      const p = e.payload || {};
+      a2ActiveSession = !!p.active;
+      np.playing = !!p.active;
+      updatePlayIcon(!!p.active);
+      const w = $("a2wave");
+      if (p.active) {
+        if (w) w.classList.add("on");
+        if ($("a2status")) {
+          $("a2status").textContent = "Streaming Lossless";
+          $("a2status").className = "tag good";
+        }
+        if ($("a2sub")) {
+          const rateStr = p.rate ? (p.rate / 1000).toFixed(1) + " kHz" : "44.1 kHz";
+          $("a2sub").textContent = `Streaming from ${p.peer || "Apple Device"} · Lossless ${rateStr} PCM`;
+        }
+      } else {
+        if (w) w.classList.remove("on");
+        if ($("a2track")) $("a2track").textContent = "Nothing playing";
+        if ($("a2sub")) $("a2sub").textContent = "Waiting for an AirPlay 2 source · 44.1 kHz 16-bit PCM";
+        if ($("a2art")) $("a2art").style.backgroundImage = "none";
+        if ($("a2bar")) $("a2bar").style.width = "0%";
+        if ($("a2elapsed")) $("a2elapsed").textContent = "0:00";
+        if ($("a2duration")) $("a2duration").textContent = "0:00";
+        if ($("a2status")) {
+          $("a2status").textContent = a2Running ? ("Ready · " + (currentBroadcastName || "Mirr") + " Audio") : "Engine Stopped";
+          $("a2status").className = a2Running ? "tag good" : "tag";
+        }
+      }
+    });
+
+    listen("airplay2://metadata", (e) => {
+      const p = e.payload || {};
+      if ($("a2track")) $("a2track").textContent = p.title || "Unknown Track";
+      if ($("a2sub")) {
+        const parts = [];
+        if (p.artist) parts.push(p.artist);
+        if (p.album) parts.push(p.album);
+        $("a2sub").textContent = parts.join(" — ") || "Lossless AirPlay 2 Stream";
+      }
+    });
+
+    listen("airplay2://artwork", (e) => {
+      const p = e.payload || {};
+      const el = $("a2art");
+      if (el) {
+        if (p.dataUrl) {
+          el.style.backgroundImage = `url("${p.dataUrl}")`;
+          el.style.backgroundSize = "cover";
+          el.style.backgroundPosition = "center";
+        } else {
+          el.style.backgroundImage = "none";
+        }
+      }
+    });
+
+    listen("airplay2://progress", (e) => {
+      const p = e.payload || {};
+      const elap = Math.floor(p.elapsedSecs || p.elapsed || 0);
+      const dur = Math.floor(p.durationSecs || p.duration || 0);
+      if ($("a2elapsed")) $("a2elapsed").textContent = fmtTime(elap);
+      if ($("a2duration")) $("a2duration").textContent = fmtTime(dur);
+      if ($("a2bar")) {
+        const pct = dur > 0 ? Math.min(100, Math.max(0, (elap / dur) * 100)) : (p.percent ? p.percent * 100 : 0);
+        $("a2bar").style.width = pct.toFixed(1) + "%";
+      }
+    });
+
+    listen("airplay2://volume", (e) => {
+      const p = e.payload || {};
+      if (typeof p.percent === "number") {
+        updateVolUi(p.percent * 100);
+      }
+    });
+
+    listen("airplay2://paused", (e) => {
+      const p = e.payload || {};
+      const isPaused = !!p.paused;
+      np.playing = !isPaused;
+      updatePlayIcon(!isPaused);
+      const w = $("a2wave");
+      if (w) {
+        if (isPaused) w.classList.remove("on");
+        else if (a2ActiveSession) w.classList.add("on");
+      }
+    });
+
+    listen("nowplaying://paused", (e) => {
+      const p = e.payload || {};
+      const isPaused = !!p.paused;
+      np.playing = !isPaused;
+      updatePlayIcon(!isPaused);
+    });
+
+    // Query initial AirPlay 2 state
+    const a2St = await invoke("airplay2_state").catch(() => null);
+    if (a2St && typeof a2St.running === "boolean") {
+      setA2RunningState(a2St.running);
+    }
 
     // events emitted before our listeners attached are gone — ask for the
     // current state explicitly
@@ -806,8 +2286,6 @@ async function loadFromBackend() {
     }
     const dacpSt = await invoke("dacp_state").catch(() => null);
     if (dacpSt) { dacpAvailable = !!dacpSt.available; renderStage(); }
-
-    renderRooms("a2rooms", DEMO.a2rooms); // illustration until AirPlay-2 engine ships
   } catch (err) {
     console.warn("backend load failed, using demo", err);
     loadDemo();
@@ -815,13 +2293,21 @@ async function loadFromBackend() {
 }
 
 function loadDemo() {
+  try {
+    const cached = JSON.parse(localStorage.getItem("mirr_settings") || "null");
+    if (cached && typeof cached === "object") {
+      runtimeSettings = { ...runtimeSettings, ...cached };
+      currentBroadcastName = runtimeSettings.broadcastName || "Mirr";
+    }
+  } catch (_) {}
+  syncSettingsUI();
+  refreshAudioDevicesList();
   applyEngineState("ready");
   $("rxState").textContent = "Idle — demo";
   renderAirplayDevices(DEMO.airplayDevices);
-  renderRooms("rooms", DEMO.castTargets);
-  renderRooms("a2rooms", DEMO.a2rooms);
+  renderRooms("rooms", DEMO.castTargets, castTo);
   renderPeers(DEMO.localsendPeers.map((p, i) => ({ ...p, fingerprint: "demo" + i })));
-  $("lsScan").textContent = "· demo peers";
+  $("lsScan").textContent = DEMO.localsendPeers.length ? `· ${DEMO.localsendPeers.length} nearby` : "· scanning…";
 }
 
 if (TAURI) { loadFromBackend(); } else { loadDemo(); }
@@ -836,18 +2322,35 @@ function updateIdleBg() {
    when the app sits waiting for a device, and on this transparent+acrylic
    window an active animation costs ~8% GPU + ~15% DWM no matter how few frames
    it submits. So after a stretch of no interaction we stop them outright; any
-   activity brings them straight back. */
+   activity brings them straight back. Rescheduling the timeout is throttled
+   while already active so 250-1000 Hz pointermove events don't churn the
+   timer heap on every pixel of cursor movement. */
 function goActive() {
-  document.body.classList.remove("calm");
+  const now = Date.now();
+  if (document.body.classList.contains("calm")) {
+    document.body.classList.remove("calm");
+  } else if (calmTimer !== null && now - lastCalmReset < 400) {
+    return;
+  }
+  lastCalmReset = now;
   clearTimeout(calmTimer);
-  calmTimer = setTimeout(() => document.body.classList.add("calm"), CALM_AFTER_MS);
+  calmTimer = setTimeout(() => {
+    calmTimer = null;
+    document.body.classList.add("calm");
+  }, CALM_AFTER_MS);
 }
 ["pointermove", "pointerdown", "keydown", "wheel"].forEach(ev =>
   window.addEventListener(ev, goActive, { passive: true }));
 window.addEventListener("focus", goActive);
 goActive();
 
-document.addEventListener("visibilitychange", updateIdleBg);
+document.addEventListener("visibilitychange", () => {
+  updateIdleBg();
+  if (!document.hidden) {
+    if (npActive) renderNpProgress();
+    reportRectSoon();
+  }
+});
 window.addEventListener("blur", () => { windowFocused = false; updateIdleBg(); });
 window.addEventListener("focus", () => { windowFocused = true; updateIdleBg(); });
 updateIdleBg();

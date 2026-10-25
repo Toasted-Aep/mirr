@@ -63,7 +63,14 @@ static STOP_PENDING: AtomicBool = AtomicBool::new(false);
 const SEEK_FAST_TICKS: u32 = 60;
 
 pub fn set_engine_pid(pid: u32) {
-    ENGINE_PID.store(pid, Ordering::SeqCst);
+    if ENGINE_PID.swap(pid, Ordering::SeqCst) != pid {
+        FAILED_HWND.store(0, Ordering::SeqCst);
+        DETECTED_HWND.store(0, Ordering::SeqCst);
+    }
+}
+
+pub fn engine_pid() -> u32 {
+    ENGINE_PID.load(Ordering::SeqCst)
 }
 
 pub fn mirror_active() -> bool {
@@ -148,6 +155,8 @@ fn stop_after_grace(app: AppHandle) {
     VIDEO_HWND.store(0, Ordering::SeqCst);
     *APPLIED.lock().unwrap() = None;
     let _ = app.emit("mirror://ended", ());
+    crate::discovery::note_client_disconnected();
+    crate::discovery::emit_devices();
 }
 
 /// Spawn the background watcher (idempotent). It embeds the engine's video
@@ -186,6 +195,8 @@ pub fn ensure_watcher(app: AppHandle) {
                 VIDEO_HWND.store(0, Ordering::SeqCst);
                 *APPLIED.lock().unwrap() = None;
                 let _ = app.emit("mirror://ended", ());
+                crate::discovery::note_client_disconnected();
+                crate::discovery::emit_devices();
             } else if let Some(rect) = *TARGET.lock().unwrap() {
                 // re-assert the latest rect; apply_rect dedupes via APPLIED,
                 // so this only costs Win32 calls when something changed

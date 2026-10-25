@@ -18,7 +18,7 @@
 
 use axum::{
     body::Bytes,
-    extract::Query,
+    extract::{ConnectInfo, DefaultBodyLimit, Query},
     routing::{get, post},
     Json, Router,
 };
@@ -26,7 +26,7 @@ use once_cell::sync::{Lazy, OnceCell};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -40,6 +40,7 @@ static APP: OnceCell<AppHandle> = OnceCell::new();
 static PEERS: Lazy<Mutex<HashMap<String, Peer>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static SESSIONS: Lazy<Mutex<HashMap<String, Session>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static FINGERPRINT: Lazy<String> = Lazy::new(generate_fingerprint);
+static CUSTOM_ALIAS: Mutex<Option<String>> = Mutex::new(None);
 
 /// What the UI sees. `PartialEq` is load-bearing: `register_peer` compares the
 /// incoming peer against the stored one so a re-announcement of unchanged data
@@ -75,12 +76,22 @@ struct DeviceInfo {
 
 struct Session {
     dir: PathBuf,
+    sender: String,
     /// fileId -> (token, fileName)
     files: HashMap<String, (String, String)>,
 }
 
 pub fn device_alias() -> String {
+    if let Some(custom) = CUSTOM_ALIAS.lock().unwrap().clone() {
+        if !custom.is_empty() {
+            return custom;
+        }
+    }
     hostname().unwrap_or_else(|| "Mirr".to_string())
+}
+
+pub fn set_custom_alias(alias: Option<String>) {
+    *CUSTOM_ALIAS.lock().unwrap() = alias.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
 }
 
 /// Sorted by alias: same HashMap-ordering rule as `discovery::airplay_devices`.
@@ -134,25 +145,53 @@ async fn run_multicast() -> anyhow::Result<()> {
 
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
+    let _ = socket.set_broadcast(true);
     let bind: SocketAddr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), PORT);
     socket.bind(&bind.into())?;
-    socket.join_multicast_v4(&MULTICAST_ADDR, &Ipv4Addr::UNSPECIFIED)?;
+
+    // Join multicast on the primary LAN IPv4 interface if available (avoids
+    // Windows routing multicast to a Hyper-V / WSL virtual switch), with a
+    // fallback to UNSPECIFIED.
+    let lan_ip = match local_ip_address::local_ip() {
+        Ok(IpAddr::V4(ip)) if !ip.is_loopback() => Some(ip),
+        _ => None,
+    };
+    if let Some(ip) = lan_ip {
+        let _ = socket.join_multicast_v4(&MULTICAST_ADDR, &ip);
+    }
+    let _ = socket.join_multicast_v4(&MULTICAST_ADDR, &Ipv4Addr::UNSPECIFIED);
     socket.set_multicast_loop_v4(false)?;
     socket.set_nonblocking(true)?;
 
     let std_sock: std::net::UdpSocket = socket.into();
-    let udp = tokio::net::UdpSocket::from_std(std_sock)?;
+    let udp = std::sync::Arc::new(tokio::net::UdpSocket::from_std(std_sock)?);
 
-    // periodic announcer
+    // Dedicated ephemeral UDP sender socket for multicast broadcasts (prevents Winsock port collisions)
+    let send_sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    send_sock.set_reuse_address(true)?;
+    let _ = send_sock.set_broadcast(true);
+    let send_bind = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
+    send_sock.bind(&send_bind.into())?;
+    send_sock.set_multicast_loop_v4(false)?;
+    if let Some(ip) = lan_ip {
+        let _ = send_sock.set_multicast_if_v4(&ip);
+    }
+    send_sock.set_nonblocking(true)?;
+    let send_std: std::net::UdpSocket = send_sock.into();
+    let udp_send = std::sync::Arc::new(tokio::net::UdpSocket::from_std(send_std)?);
+
+    // periodic announcer: announce via both multicast and subnet broadcast
     let _announcer = {
-        let udp = udp.clone_into_arc();
+        let udp_send = std::sync::Arc::clone(&udp_send);
         tokio::spawn(async move {
-            let target = SocketAddr::new(MULTICAST_ADDR.into(), PORT);
+            let target_mcast = SocketAddr::new(MULTICAST_ADDR.into(), PORT);
+            let target_bcast = SocketAddr::new(Ipv4Addr::BROADCAST.into(), PORT);
             loop {
                 let mut info = self_info();
                 info.announce = true;
                 if let Ok(payload) = serde_json::to_vec(&info) {
-                    let _ = udp.send_to(&payload, target).await;
+                    let _ = udp_send.send_to(&payload, target_mcast).await;
+                    let _ = udp_send.send_to(&payload, target_bcast).await;
                 }
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
@@ -194,10 +233,13 @@ async fn run_multicast() -> anyhow::Result<()> {
 }
 
 fn register_peer(info: &DeviceInfo, ip: &str) {
+    if info.fingerprint == *FINGERPRINT {
+        return;
+    }
     let changed = {
         let mut peers = PEERS.lock().unwrap();
         let prev = peers.get(&info.fingerprint);
-        // `register_handler` has no source address and passes "" — keep the ip
+        // If a caller has no source address and passes "" — keep the ip
         // we already learned from multicast rather than blanking it. Otherwise
         // the same device flips between two values and every flip counts as a
         // change, defeating the dedupe below.
@@ -227,6 +269,7 @@ fn register_peer(info: &DeviceInfo, ip: &str) {
     // pane the user may never have opened.
     if changed {
         emit_peers();
+        crate::discovery::emit_devices();
     }
 }
 
@@ -254,11 +297,18 @@ async fn run_http_server() -> anyhow::Result<()> {
         .route("/api/localsend/v2/info", get(info_handler))
         .route("/api/localsend/v2/register", post(register_handler))
         .route("/api/localsend/v2/prepare-upload", post(prepare_handler))
-        .route("/api/localsend/v2/upload", post(upload_handler));
+        .route(
+            "/api/localsend/v2/upload",
+            post(upload_handler).layer(DefaultBodyLimit::disable()),
+        );
 
     let addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), PORT);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -266,16 +316,19 @@ async fn info_handler() -> Json<serde_json::Value> {
     Json(serde_json::to_value(self_info()).unwrap())
 }
 
-async fn register_handler(Json(info): Json<DeviceInfo>) -> Json<serde_json::Value> {
-    // peer learned of us and is registering; record them (ip unknown here, kept blank)
-    register_peer(&info, "");
+async fn register_handler(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(info): Json<DeviceInfo>,
+) -> Json<serde_json::Value> {
+    // Peer learned of us and is registering; record their socket IP so we can
+    // send files back even if we missed their UDP multicast.
+    register_peer(&info, &addr.ip().to_string());
     Json(serde_json::to_value(self_info()).unwrap())
 }
 
 #[derive(Deserialize)]
 struct PrepareRequest {
-    #[allow(dead_code)]
-    info: serde_json::Value,
+    info: Option<DeviceInfo>,
     files: HashMap<String, FileMeta>,
 }
 
@@ -286,7 +339,18 @@ struct FileMeta {
     file_name: String,
 }
 
-async fn prepare_handler(Json(req): Json<PrepareRequest>) -> Json<serde_json::Value> {
+async fn prepare_handler(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(req): Json<PrepareRequest>,
+) -> Json<serde_json::Value> {
+    let sender = req
+        .info
+        .as_ref()
+        .map(|i| {
+            register_peer(i, &addr.ip().to_string());
+            i.alias.clone()
+        })
+        .unwrap_or_else(|| addr.ip().to_string());
     let session_id = uuid::Uuid::new_v4().to_string();
     let dir = downloads_dir();
     let _ = std::fs::create_dir_all(&dir);
@@ -296,12 +360,15 @@ async fn prepare_handler(Json(req): Json<PrepareRequest>) -> Json<serde_json::Va
     for (fid, meta) in req.files {
         let token = uuid::Uuid::new_v4().to_string();
         tokens.insert(fid.clone(), json!(token));
-        files.insert(meta.id.clone(), (token, meta.file_name.clone()));
+        files.insert(fid, (token.clone(), meta.file_name.clone()));
+        if !meta.id.is_empty() {
+            files.entry(meta.id).or_insert((token, meta.file_name));
+        }
     }
     SESSIONS
         .lock()
         .unwrap()
-        .insert(session_id.clone(), Session { dir, files });
+        .insert(session_id.clone(), Session { dir, sender, files });
 
     Json(json!({ "sessionId": session_id, "files": tokens }))
 }
@@ -319,25 +386,45 @@ async fn upload_handler(
     Query(p): Query<UploadParams>,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let path = {
-        let sessions = SESSIONS.lock().unwrap();
+    let (path, sender) = {
+        let mut sessions = SESSIONS.lock().unwrap();
         let session = sessions
-            .get(&p.session_id)
+            .get_mut(&p.session_id)
             .ok_or(axum::http::StatusCode::FORBIDDEN)?;
-        let (token, name) = session
+        let valid = session
             .files
             .get(&p.file_id)
-            .ok_or(axum::http::StatusCode::FORBIDDEN)?;
-        if *token != p.token {
+            .is_some_and(|(token, _)| *token == p.token);
+        if !valid {
             return Err(axum::http::StatusCode::FORBIDDEN);
         }
-        session.dir.join(sanitize(name))
+        let (_, name) = session.files.remove(&p.file_id).unwrap();
+        let sender = session.sender.clone();
+        let target = unique_path(&session.dir, &sanitize(&name));
+        if session.files.is_empty() {
+            sessions.remove(&p.session_id);
+        }
+        (target, sender)
     };
 
-    std::fs::write(&path, &body).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    tokio::fs::write(&path, &body)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if let Some(app) = APP.get() {
-        let _ = app.emit("localsend://received", json!({ "path": path.to_string_lossy() }));
+        let fname = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let _ = app.emit(
+            "localsend://received",
+            json!({
+                "path": path.to_string_lossy(),
+                "name": fname,
+                "size": body.len(),
+                "from": sender,
+            }),
+        );
     }
     Ok(Json(json!({ "ok": true })))
 }
@@ -347,12 +434,15 @@ async fn upload_handler(
 // ----------------------------------------------------------------------------
 
 pub async fn send_file(ip: &str, port: u16, path: &str) -> anyhow::Result<()> {
+    if ip.trim().is_empty() {
+        return Err(anyhow::anyhow!("peer IP address is unknown"));
+    }
     let pbuf = PathBuf::from(path);
     let file_name = pbuf
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "file".into());
-    let bytes = std::fs::read(&pbuf)?;
+    let bytes = tokio::fs::read(&pbuf).await?;
 
     // 1) prepare-upload
     let prepare = json!({
@@ -371,6 +461,9 @@ pub async fn send_file(ip: &str, port: u16, path: &str) -> anyhow::Result<()> {
     let parsed: serde_json::Value = serde_json::from_slice(&resp)?;
     let session_id = parsed["sessionId"].as_str().unwrap_or_default().to_string();
     let token = parsed["files"]["file1"].as_str().unwrap_or_default().to_string();
+    if session_id.is_empty() || token.is_empty() {
+        return Err(anyhow::anyhow!("transfer declined or already exists on peer"));
+    }
 
     // 2) upload
     let url = format!(
@@ -384,7 +477,7 @@ pub async fn send_file(ip: &str, port: u16, path: &str) -> anyhow::Result<()> {
 // helpers
 // ----------------------------------------------------------------------------
 
-fn downloads_dir() -> PathBuf {
+pub fn downloads_dir() -> PathBuf {
     dirs_downloads().join("Mirr")
 }
 
@@ -396,9 +489,45 @@ fn dirs_downloads() -> PathBuf {
 }
 
 fn sanitize(name: &str) -> String {
-    name.chars()
-        .map(|c| if "\\/:*?\"<>|".contains(c) { '_' } else { c })
-        .collect()
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if "\\/:*?\"<>|".contains(c) || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('.');
+    if trimmed.is_empty() {
+        "received_file".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Avoid silently overwriting an existing file in Downloads\Mirr when receiving
+/// duplicate filenames (e.g. `IMG_0001.JPG` -> `IMG_0001 (1).JPG`).
+fn unique_path(dir: & std::path::Path, file_name: &str) -> PathBuf {
+    let candidate = dir.join(file_name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let p = std::path::Path::new(file_name);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or(file_name);
+    let ext = p.extension().and_then(|s| s.to_str());
+    for i in 1..10_000 {
+        let numbered = match ext {
+            Some(e) if !e.is_empty() => format!("{stem} ({i}).{e}"),
+            _ => format!("{stem} ({i})"),
+        };
+        let next = dir.join(numbered);
+        if !next.exists() {
+            return next;
+        }
+    }
+    candidate
 }
 
 fn hostname() -> Option<String> {
@@ -423,7 +552,13 @@ async fn http_post(url: &str, content_type: &str, body: &[u8]) -> anyhow::Result
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let (host, port, path) = parse_url(url)?;
-    let mut stream = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect((host.as_str(), port)),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("connection timed out to {host}:{port}"))??;
+
     let req = format!(
         "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n",
         len = body.len()
@@ -433,7 +568,24 @@ async fn http_post(url: &str, content_type: &str, body: &[u8]) -> anyhow::Result
     stream.flush().await?;
 
     let mut resp = Vec::new();
-    stream.read_to_end(&mut resp).await?;
+    tokio::time::timeout(Duration::from_secs(30), stream.read_to_end(&mut resp))
+        .await
+        .map_err(|_| anyhow::anyhow!("response timed out from {host}:{port}"))??;
+
+    let end = resp.iter().position(|&b| b == b'\n').unwrap_or(resp.len());
+    let status_line = std::str::from_utf8(&resp[..end]).unwrap_or("");
+    let code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    if !(200..300).contains(&code) {
+        return Err(anyhow::anyhow!(
+            "peer returned HTTP {}",
+            if code == 0 { "invalid response".to_string() } else { code.to_string() }
+        ));
+    }
+
     // strip headers, return body
     if let Some(pos) = find_subslice(&resp, b"\r\n\r\n") {
         Ok(resp[pos + 4..].to_vec())
@@ -459,19 +611,4 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|w| w == needle)
-}
-
-// small ext-trait so the announcer can share the socket
-trait CloneIntoArc {
-    fn clone_into_arc(&self) -> std::sync::Arc<tokio::net::UdpSocket>;
-}
-impl CloneIntoArc for tokio::net::UdpSocket {
-    fn clone_into_arc(&self) -> std::sync::Arc<tokio::net::UdpSocket> {
-        // The listener owns the socket; for sending we open a second ephemeral socket.
-        // Returning a fresh sender keeps ownership simple.
-        let sender = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("bind sender");
-        sender.set_multicast_loop_v4(false).ok();
-        sender.set_nonblocking(true).ok();
-        std::sync::Arc::new(tokio::net::UdpSocket::from_std(sender).expect("tokio sender"))
-    }
 }

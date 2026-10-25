@@ -51,9 +51,17 @@ static WATCHER_STARTED: AtomicBool = AtomicBool::new(false);
 /// Bumped on every SETUP / deactivation. A pending quiescence timer captures
 /// this and only fires if it is unchanged (no re-SETUP happened meanwhile).
 static GEN: AtomicU64 = AtomicU64::new(0);
+/// Generation for which a quiescence timer is already in flight (0 = none),
+/// avoiding spawning duplicate timer threads on burst teardown log lines.
+static QUIESCE_GEN: AtomicU64 = AtomicU64::new(0);
 /// Content-dedupe keys shared by the poll thread and the log-line art poke.
 static MD_HASH: AtomicU64 = AtomicU64::new(0);
 static CA_HASH: AtomicU64 = AtomicU64::new(0);
+/// Cover art that landed via the immediate stdout poke (`reread_art`) before
+/// the 300 ms poller observed the accompanying `-md` rewrite for the same
+/// track. Consumed once by `handle_md` so `emit_meta`'s clear-on-meta rule
+/// doesn't wipe art that arrived milliseconds ahead of its metadata.
+static EARLY_ART: Mutex<Option<(Instant, Vec<u8>)>> = Mutex::new(None);
 
 /// uxplay resets -md to this exact content ("no data\n" + strlen+1 trailing
 /// NUL) on every SETUP; pre-seeding MD_HASH with it on activate suppresses the
@@ -186,6 +194,9 @@ pub fn on_log_line(app: &AppHandle, line: &str) {
     if l.contains("connection closed") || l.contains("removing connection") {
         if SESSION.lock().unwrap().active {
             let gen_at = GEN.load(Ordering::SeqCst);
+            if QUIESCE_GEN.swap(gen_at, Ordering::SeqCst) == gen_at {
+                return; // timer already armed for this generation
+            }
             let app = app.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(1200));
@@ -204,6 +215,10 @@ pub fn on_log_line(app: &AppHandle, line: &str) {
 /// The engine stopped (user stop or pipe EOF) — force the session inactive.
 pub fn on_engine_stop(app: &AppHandle) {
     deactivate(app);
+}
+
+pub fn is_active() -> bool {
+    SESSION.lock().unwrap().active
 }
 
 /// Snapshot for a late-attaching frontend (same pattern as receiver_state).
@@ -255,10 +270,12 @@ fn deactivate(app: &AppHandle) {
 /// Caller must hold TRANSITION.
 fn activate_inner(app: &AppHandle) {
     GEN.fetch_add(1, Ordering::SeqCst);
+    QUIESCE_GEN.store(0, Ordering::SeqCst);
     // Seed the dedupe keys with the SETUP-reset content so the poller doesn't
     // re-emit the placeholder/no-data we're about to emit here.
     MD_HASH.store(hash_bytes(RESET_MD), Ordering::SeqCst);
     CA_HASH.store(PLACEHOLDER_KEY, Ordering::SeqCst);
+    *EARLY_ART.lock().unwrap() = None;
     {
         let mut s = SESSION.lock().unwrap();
         s.active = true;
@@ -290,10 +307,14 @@ fn deactivate_inner(app: &AppHandle) {
         s.progress = None;
         was
     };
+    *EARLY_ART.lock().unwrap() = None;
     // Bump gen so any pending quiescence timer disarms itself.
     GEN.fetch_add(1, Ordering::SeqCst);
+    QUIESCE_GEN.store(0, Ordering::SeqCst);
     if was_active {
         let _ = app.emit("nowplaying://session", json!({ "active": false }));
+        crate::discovery::note_client_disconnected();
+        crate::discovery::emit_devices();
     }
 }
 
@@ -311,6 +332,23 @@ fn handle_md(app: &AppHandle, bytes: &[u8]) {
     }
     let (title, artist, album, has_data) = parse_md(bytes);
     emit_meta(app, title, artist, album, has_data);
+    // If cover art for this same track arrived via `reread_art` just before
+    // the poller saw `-md`, replay it once so `emit_meta` / `setNpMeta`
+    // clearing the art doesn't leave the track without its cover.
+    let early = EARLY_ART
+        .lock()
+        .unwrap()
+        .take()
+        .filter(|(at, _)| at.elapsed() < Duration::from_millis(1200));
+    if let Some((_, art_bytes)) = early {
+        CA_HASH.store(ca_key(&art_bytes), Ordering::SeqCst);
+        emit_art(app, &art_bytes);
+    } else if let Ok(ca_bytes) = std::fs::read(engines::ca_path()) {
+        if ca_bytes.len() != 95 && sniff_image(&ca_bytes).is_some() {
+            CA_HASH.store(ca_key(&ca_bytes), Ordering::SeqCst);
+            emit_art(app, &ca_bytes);
+        }
+    }
 }
 
 /// Parse a debounced -ca rewrite and emit art — only while Active.
@@ -322,6 +360,7 @@ fn handle_ca(app: &AppHandle, bytes: &[u8]) {
     if CA_HASH.swap(key, Ordering::SeqCst) == key {
         return;
     }
+    *EARLY_ART.lock().unwrap() = None;
     emit_art(app, bytes);
 }
 
@@ -329,6 +368,11 @@ fn handle_ca(app: &AppHandle, bytes: &[u8]) {
 fn reread_art(app: &AppHandle) {
     if !SESSION.lock().unwrap().active {
         return;
+    }
+    // Check -md first if it was already written on disk so `nowplaying://meta`
+    // lands before `nowplaying://art` when both files arrive together.
+    if let Ok(md_bytes) = std::fs::read(engines::md_path()) {
+        handle_md(app, &md_bytes);
     }
     let bytes = match std::fs::read(engines::ca_path()) {
         Ok(b) => b,
@@ -338,22 +382,26 @@ fn reread_art(app: &AppHandle) {
     if CA_HASH.swap(key, Ordering::SeqCst) == key {
         return;
     }
+    if bytes.len() != 95 && sniff_image(&bytes).is_some() {
+        *EARLY_ART.lock().unwrap() = Some((Instant::now(), bytes.clone()));
+    }
     emit_art(app, &bytes);
 }
 
 // ── emitters ───────────────────────────────────────────────────────────────
 
 fn emit_meta(app: &AppHandle, title: String, artist: String, album: String, has_data: bool) {
+    // Reset CA_HASH to placeholder whenever metadata changes: because both
+    // `emit_meta` and the frontend's `setNpMeta` handle cover art, a consecutive
+    // track on the SAME album (identical cover-art bytes) would otherwise be
+    // suppressed by `CA_HASH.swap(key) == key`.
+    CA_HASH.store(PLACEHOLDER_KEY, Ordering::SeqCst);
     let rev = {
         let mut s = SESSION.lock().unwrap();
         s.title = title.clone();
         s.artist = artist.clone();
         s.album = album.clone();
         s.has_data = has_data;
-        // Mirror the frontend's clear-on-meta rule: a track that sends metadata
-        // but no art must not leave state() handing a late attach the previous
-        // track's cover. A track that does send art repaints via emit_art.
-        s.art_data_url = None;
         s.rev += 1;
         s.rev
     };
@@ -507,3 +555,56 @@ fn base64_encode(data: &[u8]) -> String {
     }
     out
 }
+
+pub fn airplay2_session_started(app: &AppHandle) {
+    activate(app);
+}
+
+pub fn airplay2_metadata(
+    app: &AppHandle,
+    title: Option<&str>,
+    artist: Option<&str>,
+    album: Option<&str>,
+) {
+    emit_meta(
+        app,
+        title.unwrap_or("").to_string(),
+        artist.unwrap_or("").to_string(),
+        album.unwrap_or("").to_string(),
+        title.is_some() || artist.is_some() || album.is_some(),
+    );
+}
+
+pub fn airplay2_artwork(app: &AppHandle, data_url: Option<String>) {
+    let mut s = SESSION.lock().unwrap();
+    s.art_data_url = data_url.clone();
+    if s.active {
+        let _ = app.emit("nowplaying://art", serde_json::json!({ "dataUrl": data_url }));
+    }
+}
+
+pub fn airplay2_paused(app: &AppHandle, paused: bool) {
+    let _ = app.emit("nowplaying://paused", serde_json::json!({ "paused": paused }));
+}
+
+pub fn airplay2_progress(app: &AppHandle, pos: u64, dur: u64) {
+    let active = {
+        let mut s = SESSION.lock().unwrap();
+        if s.active {
+            s.progress = Some((pos, dur, Instant::now()));
+        }
+        s.active
+    };
+    if active {
+        let remaining = dur.saturating_sub(pos);
+        let _ = app.emit(
+            "nowplaying://progress",
+            serde_json::json!({ "position": pos, "duration": dur, "remaining": remaining }),
+        );
+    }
+}
+
+pub fn airplay2_session_ended(app: &AppHandle) {
+    deactivate(app);
+}
+
