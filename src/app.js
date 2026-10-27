@@ -61,6 +61,7 @@ let runtimeSettings = {
   autoTheater: false,
   audioOutputDevice: "default",
   autoSwitchAudioOutput: true,
+  preferDolbyAtmos: true,
   bgTheme: "horizon",
   // REMINDER: Default showTransportControls to false on initial setup of the app
   // as requested until previous/next song and pause/play controls are fully resolved.
@@ -1761,8 +1762,15 @@ function renderAudioDeviceOptions() {
   const currentVal = runtimeSettings.audioOutputDevice || "default";
   sel.innerHTML = "";
 
-  const defDev = availableAudioDevices.find(d => d.isDefault);
-  const defLabel = defDev ? `Windows Default (${defDev.name})` : "Windows Default";
+  const defDev = availableAudioDevices.find(d => (d.is_default ?? d.isDefault));
+  let defTag = "";
+  if (defDev) {
+    const isAtmos = !!(defDev.is_dolby_atmos ?? defDev.isDolbyAtmos);
+    const isSpatial = !!(defDev.supports_spatial ?? defDev.supportsSpatial);
+    if (isAtmos) defTag = " · Dolby Atmos";
+    else if (isSpatial) defTag = " · Spatial Audio";
+  }
+  const defLabel = defDev ? `Windows Default (${defDev.name}${defTag})` : "Windows Default";
   const defOpt = document.createElement("option");
   defOpt.value = "default";
   defOpt.textContent = defLabel;
@@ -1771,12 +1779,108 @@ function renderAudioDeviceOptions() {
   availableAudioDevices.forEach((d) => {
     const opt = document.createElement("option");
     opt.value = d.id;
-    opt.textContent = d.name + (d.isDefault ? " [Default]" : "");
+    let label = d.name;
+    const isAtmos = !!(d.is_dolby_atmos ?? d.isDolbyAtmos);
+    const isSpatial = !!(d.supports_spatial ?? d.supportsSpatial);
+    const isDef = !!(d.is_default ?? d.isDefault);
+    if (isAtmos) {
+      label += " [Dolby Atmos]";
+    } else if (isSpatial) {
+      label += " [Spatial Audio]";
+    }
+    if (isDef) {
+      label += " (Default)";
+    }
+    opt.textContent = label;
     sel.appendChild(opt);
   });
 
   sel.value = currentVal;
   if (!sel.value) sel.value = "default";
+}
+
+let currentSpatialCaps = {
+  isSpatialSupported: false,
+  isDolbyAtmos: false,
+  spatialTechnology: "Stereo",
+  maxChannels: 2
+};
+
+function updateSpatialAudioUI(caps) {
+  if (!caps) return;
+  const isAtmos = !!(caps.is_dolby_atmos ?? caps.isDolbyAtmos ?? caps.dolbyAtmos);
+  const isSpatial = !!(caps.is_spatial_supported ?? caps.isSpatialSupported ?? caps.spatialAudio ?? isAtmos);
+  const tech = caps.spatial_technology || caps.spatialTechnology || (isAtmos ? "Dolby Atmos (Hardware / DAX3)" : (isSpatial ? "Windows Spatial Audio" : "Stereo"));
+  const maxChannels = caps.max_channels || caps.maxChannels || (isAtmos ? 8 : 2);
+
+  currentSpatialCaps = {
+    isSpatialSupported: isSpatial,
+    isDolbyAtmos: isAtmos,
+    spatialTechnology: tech,
+    maxChannels
+  };
+
+  const a2Badge = $("a2spatialBadge");
+  const a2Tech = $("a2spatialTech");
+  const a2Sub = $("a2spatialSub");
+  const a2AtmosBadge = $("a2atmosBadge");
+  const npAtmosBadge = $("npAtmosBadge");
+  const a2MdnsModel = $("a2mdnsModel");
+  const a2Format = $("a2audioFormat");
+  const a2FormatSub = $("a2audioFormatSub");
+
+  if (a2Badge) {
+    a2Badge.style.display = isAtmos ? "inline-block" : "none";
+  }
+  if (a2AtmosBadge) {
+    a2AtmosBadge.style.display = isAtmos ? "inline-block" : "none";
+  }
+  if (npAtmosBadge) {
+    npAtmosBadge.style.display = isAtmos ? "inline-block" : "none";
+  }
+
+  if (a2Tech) {
+    if (isAtmos) {
+      a2Tech.textContent = tech || "Dolby Atmos Active";
+    } else if (isSpatial) {
+      a2Tech.textContent = tech || "Windows Spatial Audio";
+    } else {
+      a2Tech.textContent = "Standard 2-Channel Stereo";
+    }
+  }
+
+  if (a2Sub) {
+    if (isAtmos) {
+      a2Sub.textContent = "HomePod 2nd Gen · Dolby Atmos Spatial Profile Advertised";
+    } else if (isSpatial) {
+      a2Sub.textContent = "Spatial Audio Bed Matrix · Multi-Channel Output";
+    } else {
+      a2Sub.textContent = "Direct WASAPI 2-Channel Audio Engine";
+    }
+  }
+
+  if (a2MdnsModel) {
+    if (isAtmos) {
+      a2MdnsModel.textContent = "Apple HomePod (2nd gen) · Spatial Audio Model";
+    } else {
+      a2MdnsModel.textContent = "OpenAirPlay2 Speaker · Port 7000";
+    }
+  }
+
+  if (a2Format) {
+    if (isAtmos) {
+      a2Format.textContent = "48.0 / 44.1 kHz · Dolby Atmos Spatial Bed";
+    } else {
+      a2Format.textContent = "44.1 kHz · 16-bit Lossless Stereo";
+    }
+  }
+  if (a2FormatSub) {
+    if (isAtmos) {
+      a2FormatSub.textContent = "Direct WASAPI Spatial Matrix Output";
+    } else {
+      a2FormatSub.textContent = "Direct WASAPI Low-Latency Output";
+    }
+  }
 }
 
 function syncSettingsUI() {
@@ -1806,6 +1910,12 @@ function syncSettingsUI() {
     const on = runtimeSettings.autoSwitchAudioOutput !== false;
     asw.classList.toggle("on", on);
     asw.setAttribute("aria-checked", String(on));
+  }
+  const pda = $("setPreferDolbyAtmos");
+  if (pda) {
+    const on = runtimeSettings.preferDolbyAtmos !== false;
+    pda.classList.toggle("on", on);
+    pda.setAttribute("aria-checked", String(on));
   }
   const audSel = $("setAudioOutputSelect");
   if (audSel) {
@@ -1851,6 +1961,7 @@ async function persistSettings(restartReceiver = false) {
         autoTheater: runtimeSettings.autoTheater,
         audioOutputDevice: runtimeSettings.audioOutputDevice || "default",
         autoSwitchAudioOutput: runtimeSettings.autoSwitchAudioOutput !== false,
+        preferDolbyAtmos: runtimeSettings.preferDolbyAtmos !== false,
         showTransportControls: !!runtimeSettings.showTransportControls,
         receiverMode: runtimeSettings.receiverMode || "dual"
       },
@@ -1861,6 +1972,7 @@ async function persistSettings(restartReceiver = false) {
       autoTheater: runtimeSettings.autoTheater,
       audioOutputDevice: runtimeSettings.audioOutputDevice || "default",
       autoSwitchAudioOutput: runtimeSettings.autoSwitchAudioOutput !== false,
+      preferDolbyAtmos: runtimeSettings.preferDolbyAtmos !== false,
       showTransportControls: !!runtimeSettings.showTransportControls,
       receiverMode: runtimeSettings.receiverMode || "dual",
       restartReceiver: !!restartReceiver
@@ -1931,7 +2043,7 @@ document.querySelectorAll("#setReceiverModeGroup .seg-btn").forEach((btn) => {
     }
   });
 });
-["setAlwaysOnTop", "setAutoTheater", "setAutoSwitchAudio", "setShowTransportControls"].forEach((id) => {
+["setAlwaysOnTop", "setAutoTheater", "setAutoSwitchAudio", "setPreferDolbyAtmos", "setShowTransportControls"].forEach((id) => {
   const sw = $(id);
   if (!sw) return;
   const toggle = () => {
@@ -1941,6 +2053,14 @@ document.querySelectorAll("#setReceiverModeGroup .seg-btn").forEach((btn) => {
     else if (id === "setAutoSwitchAudio") {
       runtimeSettings.autoSwitchAudioOutput = next;
       toast(next ? "Auto-switch to new sound output enabled" : "Auto-switch to new sound output disabled");
+    } else if (id === "setPreferDolbyAtmos") {
+      runtimeSettings.preferDolbyAtmos = next;
+      toast(next ? "Prefer Dolby Atmos enabled" : "Prefer Dolby Atmos disabled");
+      if (TAURI) {
+        invoke("get_spatial_audio_capabilities").then(updateSpatialAudioUI).catch(() => {});
+      }
+      persistSettings(true);
+      return;
     } else if (id === "setShowTransportControls") {
       runtimeSettings.showTransportControls = next;
       updateTransportControlsVisibility();
@@ -1961,6 +2081,12 @@ if (audioSelect) {
     persistSettings(true);
     const chosenName = audioSelect.options[audioSelect.selectedIndex]?.text || "Device";
     toast(`Sound output set to: ${chosenName}`);
+    if (TAURI) {
+      const devId = runtimeSettings.audioOutputDevice === "default" ? null : runtimeSettings.audioOutputDevice;
+      invoke("get_spatial_audio_capabilities", { deviceId: devId })
+        .then(updateSpatialAudioUI)
+        .catch(() => {});
+    }
   });
 }
 
@@ -1998,6 +2124,7 @@ async function loadFromBackend() {
         autoTheater: !!saved.autoTheater,
         audioOutputDevice: saved.audioOutputDevice || "default",
         autoSwitchAudioOutput: saved.autoSwitchAudioOutput !== false,
+        preferDolbyAtmos: saved.preferDolbyAtmos !== false,
         // REMINDER: Default showTransportControls to false on initial setup of the app
         showTransportControls: saved.showTransportControls === true
       };
@@ -2005,6 +2132,10 @@ async function loadFromBackend() {
     }
     updateTransportControlsVisibility();
     await refreshAudioDevicesList();
+    const initialSpatial = await invoke("get_spatial_audio_capabilities").catch(() => null);
+    if (initialSpatial) {
+      updateSpatialAudioUI(initialSpatial);
+    }
     applyTheme(runtimeSettings.bgTheme || "horizon");
     syncSettingsUI();
     $("rxEngineTag").textContent = "· mDNS live";
@@ -2055,6 +2186,7 @@ async function loadFromBackend() {
       if (payload.device && payload.autoSwitched) {
         toast(`Sound output switched to: ${payload.device.name}`);
       }
+      invoke("get_spatial_audio_capabilities").then(updateSpatialAudioUI).catch(() => {});
     });
     listen("audio://device-switched", (e) => {
       const payload = e.payload || {};
@@ -2062,12 +2194,21 @@ async function loadFromBackend() {
         toast(`Sound output switched to: ${payload.device.name}`);
         renderAudioDeviceOptions();
       }
+      invoke("get_spatial_audio_capabilities").then(updateSpatialAudioUI).catch(() => {});
     });
     listen("audio://devices-changed", (e) => {
       const payload = e.payload || {};
       if (payload.devices) {
         availableAudioDevices = payload.devices;
         renderAudioDeviceOptions();
+      }
+      invoke("get_spatial_audio_capabilities").then(updateSpatialAudioUI).catch(() => {});
+    });
+    listen("audio://spatial-changed", (e) => {
+      const caps = e.payload || {};
+      updateSpatialAudioUI(caps);
+      if (caps.is_dolby_atmos || caps.isDolbyAtmos) {
+        toast(`Dolby Atmos active on ${caps.spatial_technology || "audio endpoint"}`);
       }
     });
 
@@ -2150,6 +2291,9 @@ async function loadFromBackend() {
     // AirPlay 2 native session events
     listen("airplay2://status", (e) => {
       const p = e.payload || {};
+      if (p.dolbyAtmos !== undefined || p.spatialAudio !== undefined) {
+        updateSpatialAudioUI(p);
+      }
       if (p.state === "streaming") {
         a2ActiveSession = true;
         if ($("a2status")) {
@@ -2170,6 +2314,9 @@ async function loadFromBackend() {
 
     listen("airplay2://session", (e) => {
       const p = e.payload || {};
+      if (p.dolbyAtmos !== undefined || p.spatialAudio !== undefined) {
+        updateSpatialAudioUI(p);
+      }
       a2ActiveSession = !!p.active;
       np.playing = !!p.active;
       updatePlayIcon(!!p.active);
@@ -2182,7 +2329,8 @@ async function loadFromBackend() {
         }
         if ($("a2sub")) {
           const rateStr = p.rate ? (p.rate / 1000).toFixed(1) + " kHz" : "44.1 kHz";
-          $("a2sub").textContent = `Streaming from ${p.peer || "Apple Device"} · Lossless ${rateStr} PCM`;
+          const atmosTag = p.dolbyAtmos ? " · Dolby Atmos Spatial" : "";
+          $("a2sub").textContent = `Streaming from ${p.peer || "Apple Device"} · Lossless ${rateStr} PCM${atmosTag}`;
         }
       } else {
         if (w) w.classList.remove("on");
@@ -2302,6 +2450,12 @@ function loadDemo() {
   } catch (_) {}
   syncSettingsUI();
   refreshAudioDevicesList();
+  updateSpatialAudioUI({
+    is_spatial_supported: true,
+    is_dolby_atmos: true,
+    spatial_technology: "Dolby Atmos (Hardware / DAX3)",
+    max_channels: 8
+  });
   applyEngineState("ready");
   $("rxState").textContent = "Idle — demo";
   renderAirplayDevices(DEMO.airplayDevices);

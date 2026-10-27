@@ -679,6 +679,7 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.15);}
 .feasbadge{font-size:10px;font-weight:700;padding:3px 9px;border-radius:999px;letter-spacing:.4px;flex:0 0 auto;}
 .fb-yes{background:rgba(95,225,165,.18);color:#9cffd0;}
 .fb-part{background:rgba(255,200,90,.16);color:#ffd88a;}
+.fb-atmos{background:rgba(164,112,224,.22);color:#d4b3ff;border:1px solid rgba(164,112,224,.45);box-shadow:0 0 10px rgba(164,112,224,.25);}
 
 /* ---------- toasts ---------- */
 .toasts{position:fixed;bottom:78px;left:50%;transform:translateX(-50%);z-index:65;display:flex;flex-direction:column;gap:8px;align-items:center;}

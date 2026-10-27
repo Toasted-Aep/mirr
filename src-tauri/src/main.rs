@@ -76,6 +76,39 @@ fn get_default_audio_device() -> Option<audio::AudioDevice> {
     audio::get_default_device()
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EffectiveAudioDeviceResponse {
+    device: Option<audio::AudioDevice>,
+    spatial: audio::SpatialCapabilities,
+}
+
+#[tauri::command]
+fn get_spatial_audio_capabilities(device_id: Option<String>) -> audio::SpatialCapabilities {
+    if let Some(ref id) = device_id {
+        audio::get_spatial_capabilities(Some(id.as_str()))
+    } else {
+        let cfg = engines::get_config();
+        let (_dev, spatial) = audio::get_effective_audio_device(&cfg.audio_output_device, cfg.prefer_dolby_atmos);
+        spatial
+    }
+}
+
+#[tauri::command]
+fn get_effective_audio_device(
+    device_id: Option<String>,
+    prefer_dolby_atmos: Option<bool>,
+) -> EffectiveAudioDeviceResponse {
+    let cfg = engines::get_config();
+    let configured = device_id.unwrap_or(cfg.audio_output_device);
+    let prefer = prefer_dolby_atmos.unwrap_or(cfg.prefer_dolby_atmos);
+    let (dev, spatial) = audio::get_effective_audio_device(&configured, prefer);
+    EffectiveAudioDeviceResponse {
+        device: dev,
+        spatial,
+    }
+}
+
 #[tauri::command]
 fn update_settings(
     app: tauri::AppHandle,
@@ -88,6 +121,7 @@ fn update_settings(
     auto_theater: Option<bool>,
     audio_output_device: Option<String>,
     auto_switch_audio_output: Option<bool>,
+    prefer_dolby_atmos: Option<bool>,
     show_transport_controls: Option<bool>,
     receiver_mode: Option<String>,
 ) -> Result<engines::EngineConfig, String> {
@@ -102,6 +136,7 @@ fn update_settings(
         if let Some(at) = auto_theater { c.auto_theater = at; }
         if let Some(ad) = audio_output_device { c.audio_output_device = ad; }
         if let Some(asw) = auto_switch_audio_output { c.auto_switch_audio_output = asw; }
+        if let Some(pda) = prefer_dolby_atmos { c.prefer_dolby_atmos = pda; }
         if let Some(stc) = show_transport_controls { c.show_transport_controls = stc; }
         if let Some(rm) = receiver_mode { c.receiver_mode = rm; }
         c
@@ -400,6 +435,8 @@ fn main() {
             mirror_active,
             list_audio_devices,
             get_default_audio_device,
+            get_effective_audio_device,
+            get_spatial_audio_capabilities,
             audio_get_volume,
             audio_set_volume,
         ])

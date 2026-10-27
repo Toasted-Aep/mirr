@@ -37,6 +37,10 @@ fn default_receiver_mode() -> String {
     "dual".to_string()
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineConfig {
@@ -47,6 +51,8 @@ pub struct EngineConfig {
     pub auto_theater: bool,
     pub audio_output_device: String,
     pub auto_switch_audio_output: bool,
+    #[serde(default = "default_true")]
+    pub prefer_dolby_atmos: bool,
     // REMINDER / USER REQUIREMENT: Default to false (disabled) on first setup
     // until previous/next/play/pause DACP control issues are fully resolved.
     #[serde(default)]
@@ -65,6 +71,7 @@ impl Default for EngineConfig {
             auto_theater: false,
             audio_output_device: "default".to_string(),
             auto_switch_audio_output: true,
+            prefer_dolby_atmos: true,
             // REMINDER: Transport controls are disabled by default on initial app setup
             // until transport playback controls (previous, play/pause, next) are completely resolved.
             show_transport_controls: false,
@@ -294,6 +301,7 @@ pub fn diagnostics(app: &AppHandle) -> serde_json::Value {
         "vsync": cfg.vsync,
         "audioOutputDevice": cfg.audio_output_device,
         "autoSwitchAudioOutput": cfg.auto_switch_audio_output,
+        "preferDolbyAtmos": cfg.prefer_dolby_atmos,
         "localsendPort": 53317,
         "airplay2Running": crate::airplay2::is_running(),
     })

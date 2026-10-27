@@ -153,7 +153,10 @@
                     <div class="np-meta-scroll" id="npMetaScroll">
                       <div class="nptitle" id="npTitle">Audio from your device</div>
                       <div class="npalbum" id="npAlbum" hidden></div>
-                      <div class="npartist" id="npArtist">Waiting for track info…</div>
+                      <div style="display:flex; align-items:center; gap:6px; margin-top:2px;">
+                        <span class="feasbadge fb-atmos" id="npAtmosBadge" style="display:none;">DOLBY ATMOS</span>
+                        <div class="npartist" id="npArtist">Waiting for track info…</div>
+                      </div>
                     </div>
                   </div>
                   <div class="npprog" id="npProg">
@@ -255,6 +258,7 @@
               </div>
               <div style="display:flex; align-items:center; justify-content:space-between; margin-top:10px;">
                 <div class="tag good" id="a2status">Ready · Mirr Audio</div>
+                <div class="feasbadge fb-atmos" id="a2atmosBadge" style="display:none;">DOLBY ATMOS</div>
               </div>
             </div>
             <button class="btn primary" id="a2btn" type="button">Stop AirPlay 2</button>
@@ -268,13 +272,21 @@
             </div>
             <div class="tile" style="padding:14px 18px;">
               <div style="font-size:12px; color:var(--text-dim); margin-bottom:4px;">Audio Format</div>
-              <div style="font-weight:600;">44.1 kHz · 16-bit Stereo</div>
-              <div style="font-size:11px; color:var(--text-dim); margin-top:2px;">Direct WASAPI Output</div>
+              <div style="font-weight:600;" id="a2audioFormat">44.1 kHz · 16-bit Stereo</div>
+              <div style="font-size:11px; color:var(--text-dim); margin-top:2px;" id="a2audioFormatSub">Direct WASAPI Output</div>
             </div>
             <div class="tile" style="padding:14px 18px;">
               <div style="font-size:12px; color:var(--text-dim); margin-bottom:4px;">mDNS Service</div>
               <div style="font-weight:600;" id="a2mdnsName">Mirr Audio</div>
-              <div style="font-size:11px; color:var(--text-dim); margin-top:2px;">_airplay._tcp on Port 7000</div>
+              <div style="font-size:11px; color:var(--text-dim); margin-top:2px;" id="a2mdnsModel">Apple HomePod Profile · Port 7000</div>
+            </div>
+            <div class="tile" style="padding:14px 18px;" id="a2spatialTile">
+              <div style="font-size:12px; color:var(--text-dim); margin-bottom:4px;">Spatial Audio / Dolby Atmos</div>
+              <div style="font-weight:600; display:flex; align-items:center; gap:6px;">
+                <span class="feasbadge fb-atmos" id="a2spatialBadge" style="display:none;">DOLBY ATMOS</span>
+                <span id="a2spatialTech">Stereo</span>
+              </div>
+              <div style="font-size:11px; color:var(--text-dim); margin-top:2px;" id="a2spatialSub">Probing audio endpoint…</div>
             </div>
           </div>
           <div class="notice good"><b>Native AirPlay 2 Engine Active:</b> Mirr embeds the <code>openairplay2</code> pure Rust receiver on port 7000 while keeping UxPlay active for Screen Mirroring on port 7100. Senders can stream high-fidelity lossless music from Apple Music, Podcasts, or any iOS/macOS audio app directly to Windows.</div>
@@ -622,6 +634,13 @@
               <div class="desc">Automatically change playback when Windows default sound output changes (e.g. connecting headphones).</div>
             </div>
             <div class="switch on" id="setAutoSwitchAudio" role="switch" tabindex="0" aria-checked="true"></div>
+          </div>
+          <div class="srow tile">
+            <div class="st">
+              <div class="lab">Prefer Dolby Atmos / Spatial Audio</div>
+              <div class="desc">Automatically configure and route AirPlay casting to a connected Dolby Atmos device (e.g. laptop speakers supporting Dolby DAX3 or external Atmos soundbar).</div>
+            </div>
+            <div class="switch on" id="setPreferDolbyAtmos" role="switch" tabindex="0" aria-checked="true"></div>
           </div>
 
           <div class="section-h mt">Capabilities</div>

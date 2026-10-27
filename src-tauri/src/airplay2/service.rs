@@ -8,10 +8,11 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use base64::Engine;
 use mdns_sd::ServiceInfo;
-use openairplay2::{Event, Receiver};
+use openairplay2::server::{serve, Context};
+use openairplay2::{txt_records, Event, Identity, Receiver, SinkFactory};
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
 
@@ -63,13 +64,27 @@ pub fn start(app: AppHandle) -> anyhow::Result<()> {
     } else {
         cfg.broadcast_name.trim().to_string()
     };
-    let a2_name = format!("{broadcast_name} Audio");
+
+    // Check spatial audio & Dolby Atmos capabilities on the active/effective audio endpoint
+    let (effective_device, spatial_caps) = crate::audio::get_effective_audio_device(
+        &cfg.audio_output_device,
+        cfg.prefer_dolby_atmos,
+    );
+    let effective_target_device = effective_device.as_ref().map(|d| d.id.clone());
+
+    let a2_name = if spatial_caps.is_dolby_atmos {
+        format!("{broadcast_name} (Dolby Atmos)")
+    } else if spatial_caps.is_spatial_supported {
+        format!("{broadcast_name} Spatial Audio")
+    } else {
+        format!("{broadcast_name} Audio")
+    };
 
     let identity_dir = crate::engines::nowplaying_dir();
     let _ = std::fs::create_dir_all(&identity_dir);
     let identity_path = identity_dir.join("airplay2-identity");
 
-    let receiver = Receiver::builder()
+    let base_receiver = Receiver::builder()
         .name(&a2_name)
         .port(7000)
         .identity_path(&identity_path)
@@ -77,13 +92,55 @@ pub fn start(app: AppHandle) -> anyhow::Result<()> {
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to build AirPlay 2 receiver: {e}"))?;
 
-    // Prepare mDNS announcement using mdns-sd
-    let txt_records = receiver.txt_records();
+    let identity = Identity::load_or_create(&identity_path)
+        .map_err(|e| anyhow::anyhow!("Failed to load receiver identity: {e}"))?;
+
+    let mut config = base_receiver.config().clone();
+    config.name = a2_name.clone();
+
+    // Constant feature bitmasks:
+    // Base: 0x0001_8340_405F_CA00 (Standard AirPlay 2 + metadata bits)
+    // Multichannel (Bit 41): 1 << 41
+    // Lossless (Bit 46): 1 << 46
+    // Spatial Audio (Bit 51): 1 << 51
+    // Dolby Atmos (Bit 56): 1 << 56
+    const BASE_FEATURES: u64 = 0x0001_8340_405F_CA00;
+    const MULTICHANNEL_BIT: u64 = 1 << 41;
+    const LOSSLESS_BIT: u64 = 1 << 46;
+    const SPATIAL_BIT: u64 = 1 << 51;
+    const ATMOS_BIT: u64 = 1 << 56;
+
+    if spatial_caps.is_dolby_atmos {
+        // Upgrade simulated speaker to Apple HomePod (2nd gen) with Dolby Atmos
+        config.model = "AudioAccessory6,1".to_string();
+        config.features = BASE_FEATURES | MULTICHANNEL_BIT | LOSSLESS_BIT | SPATIAL_BIT | ATMOS_BIT;
+    } else if spatial_caps.is_spatial_supported {
+        // Upgrade simulated speaker to Apple HomePod mini with Spatial Audio
+        config.model = "AudioAccessory5,1".to_string();
+        config.features = BASE_FEATURES | MULTICHANNEL_BIT | LOSSLESS_BIT | SPATIAL_BIT;
+    }
+
+    // Generate TXT records from the updated config & identity
+    let generated_records = txt_records(&config, &identity);
     let mut props = HashMap::new();
-    for rec in txt_records {
+    for rec in generated_records {
         if let Some((k, v)) = rec.split_once('=') {
             props.insert(k.to_string(), v.to_string());
         }
+    }
+
+    if spatial_caps.is_dolby_atmos {
+        props.insert("spatial".to_string(), "1".to_string());
+        props.insert("atmos".to_string(), "1".to_string());
+        props.insert("audioFormats".to_string(), "1,2,3,4".to_string());
+        props.insert("channels".to_string(), format!("{}", spatial_caps.max_channels.max(8)));
+        props.insert("soundTechnology".to_string(), spatial_caps.spatial_technology.clone());
+        props.insert("sf".to_string(), "0x4".to_string());
+    } else if spatial_caps.is_spatial_supported {
+        props.insert("spatial".to_string(), "1".to_string());
+        props.insert("audioFormats".to_string(), "1,2,3".to_string());
+        props.insert("channels".to_string(), format!("{}", spatial_caps.max_channels.max(2)));
+        props.insert("soundTechnology".to_string(), spatial_caps.spatial_technology.clone());
     }
 
     let lan_ip = local_ip_address::local_ip()
@@ -128,27 +185,45 @@ pub fn start(app: AppHandle) -> anyhow::Result<()> {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
 
     let app_clone = app.clone();
+    let spatial_caps_clone = spatial_caps.clone();
 
-    // On Windows, Tokio's TcpListener::bind(::) defaults to IPV6_V6ONLY=1,
-    // preventing IPv4 Wi-Fi senders from connecting. By temporarily holding [::]:7000,
-    // openairplay2's bind fallback automatically binds directly to 0.0.0.0:7000.
-    #[cfg(windows)]
-    let v6_blocker = std::net::TcpListener::bind("[::]:7000").ok();
+    // Bind listener directly on port 7000
+    let std_listener = std::net::TcpListener::bind("0.0.0.0:7000")
+        .or_else(|_| std::net::TcpListener::bind("127.0.0.1:7000"))
+        .map_err(|e| anyhow::anyhow!("Failed to bind AirPlay 2 control port 7000: {e}"))?;
+    std_listener.set_nonblocking(true)?;
 
     // Spawn the receiver loop on Tokio runtime
     tauri::async_runtime::spawn(async move {
-        #[cfg(windows)]
-        if let Some(blocker) = v6_blocker {
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-                drop(blocker);
-            });
-        }
+        let listener = match tokio::net::TcpListener::from_std(std_listener) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("[airplay2] Failed to convert std listener: {e}");
+                return;
+            }
+        };
 
-        let _ = app_clone.emit("airplay2://status", json!({ "state": "ready", "name": a2_name }));
+        let _ = app_clone.emit(
+            "airplay2://status",
+            json!({
+                "state": "ready",
+                "name": a2_name,
+                "dolbyAtmos": spatial_caps_clone.is_dolby_atmos,
+                "spatialAudio": spatial_caps_clone.is_spatial_supported,
+                "spatialTechnology": spatial_caps_clone.spatial_technology,
+                "simulatedSpeaker": if spatial_caps_clone.is_dolby_atmos {
+                    "HomePod (Dolby Atmos Simulated Speaker)"
+                } else if spatial_caps_clone.is_spatial_supported {
+                    "Spatial Audio Speaker"
+                } else {
+                    "Stereo Lossless Speaker"
+                }
+            }),
+        );
 
         // Event processing task
         let app_events = app_clone.clone();
+        let session_spatial = spatial_caps_clone.clone();
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
                 match event {
@@ -161,7 +236,12 @@ pub fn start(app: AppHandle) -> anyhow::Result<()> {
 
                         let _ = app_events.emit(
                             "airplay2://status",
-                            json!({ "state": "streaming", "peer": peer_str }),
+                            json!({
+                                "state": "streaming",
+                                "peer": peer_str,
+                                "dolbyAtmos": session_spatial.is_dolby_atmos,
+                                "spatialTechnology": session_spatial.spatial_technology,
+                            }),
                         );
                         let _ = app_events.emit(
                             "airplay2://session",
@@ -169,7 +249,17 @@ pub fn start(app: AppHandle) -> anyhow::Result<()> {
                                 "active": true,
                                 "peer": peer_str,
                                 "rate": rate,
-                                "channels": channels
+                                "channels": channels,
+                                "dolbyAtmos": session_spatial.is_dolby_atmos,
+                                "spatialAudio": session_spatial.is_spatial_supported,
+                                "spatialTechnology": session_spatial.spatial_technology,
+                                "simulatedSpeaker": if session_spatial.is_dolby_atmos {
+                                    "HomePod (Dolby Atmos Simulated Speaker)"
+                                } else if session_spatial.is_spatial_supported {
+                                    "Spatial Audio Speaker"
+                                } else {
+                                    "Stereo Lossless Speaker"
+                                }
                             }),
                         );
                         crate::discovery::note_client_connected(Some(&peer_str), None, None, None);
@@ -273,14 +363,9 @@ pub fn start(app: AppHandle) -> anyhow::Result<()> {
         });
 
         // Run the receiver until shutdown signal
-        let sink_factory = move |rate: u32, channels: u8| -> Box<dyn openairplay2::AudioSink> {
-            let cur_cfg = crate::engines::get_config();
-            let audio_device_name = cur_cfg.audio_output_device;
-            let dev = if audio_device_name.is_empty() || audio_device_name == "default" {
-                None
-            } else {
-                Some(audio_device_name.as_str())
-            };
+        let target_dev_clone = effective_target_device.clone();
+        let sink_factory: SinkFactory = Arc::new(move |rate: u32, channels: u8| -> Box<dyn openairplay2::AudioSink> {
+            let dev = target_dev_clone.as_deref();
             match WasapiSink::new(rate, channels, dev) {
                 Ok(sink) => Box::new(sink),
                 Err(e) => {
@@ -293,10 +378,17 @@ pub fn start(app: AppHandle) -> anyhow::Result<()> {
                     Box::new(NoopSink)
                 }
             }
-        };
+        });
+
+        let context = Arc::new(Context {
+            config: config.clone(),
+            identity,
+            sink_factory,
+            events: event_tx,
+        });
 
         tokio::select! {
-            res = receiver.run(sink_factory, event_tx) => {
+            res = serve(listener, context) => {
                 if let Err(e) = res {
                     eprintln!("[airplay2] Receiver error: {e}");
                     let _ = app_clone.emit("airplay2://status", json!({ "state": "error", "detail": e.to_string() }));
@@ -386,13 +478,17 @@ mod tests {
         let _ = std::fs::create_dir_all(&temp_dir);
         let id_path = temp_dir.join("id");
 
-        let receiver = Receiver::builder()
-            .name("Mirr Audio Test Info")
-            .port(7009)
-            .identity_path(&id_path)
-            .advertise(false)
-            .build()
-            .expect("Receiver build should succeed");
+        let identity = Identity::load_or_create(&id_path).expect("Identity create");
+        let config = openairplay2::Config {
+            name: "Mirr Atmos Test Info".to_string(),
+            port: 7009,
+            mac: [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc],
+            model: "AudioAccessory6,1".to_string(),
+            source_version: "366.0".to_string(),
+            features: 0x0109_C340_405F_CA00,
+            status_flags: 0x4,
+            password: None,
+        };
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -403,32 +499,54 @@ mod tests {
             fn flush(&mut self) {}
         }
 
-        // Block IPv6 bind so openairplay2 falls back to IPv4 (0.0.0.0:7009)
-        let v6_blocker = std::net::TcpListener::bind("[::]:7009").expect("bind v6 blocker");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:7009").await.expect("bind listener");
+
+        let context = Arc::new(Context {
+            config: config.clone(),
+            identity,
+            sink_factory: Arc::new(|_, _| Box::new(NoopSink)),
+            events: event_tx,
+        });
 
         let task = tokio::spawn(async move {
             tokio::select! {
-                res = receiver.run(|_, _| Box::new(NoopSink), event_tx) => {
-                    eprintln!("[test] receiver run exited: {res:?}");
+                res = serve(listener, context) => {
+                    eprintln!("[test] receiver serve exited: {res:?}");
                 }
                 _ = shutdown_rx => {}
             }
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        // Drop blocker now that receiver bound IPv4
-        drop(v6_blocker);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut stream = tokio::net::TcpStream::connect("127.0.0.1:7009").await.expect("connect directly to receiver port 7009 over IPv4");
+        let mut stream = tokio::net::TcpStream::connect("127.0.0.1:7009").await.expect("connect directly to receiver port 7009");
         stream.write_all(b"GET /info HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").await.expect("write request");
 
-        let mut buf = vec![0u8; 2048];
+        let mut buf = vec![0u8; 4096];
         let n = stream.read(&mut buf).await.expect("read response");
-        let resp = String::from_utf8_lossy(&buf[..n]);
+        let resp_slice = &buf[..n];
 
-        assert!(resp.starts_with("HTTP/1.1 200 OK"), "Expected 200 OK, got: {resp}");
-        assert!(resp.contains("application/x-apple-binary-plist"), "Expected binary plist content type");
+        // Find boundary \r\n\r\n
+        let header_end = resp_slice
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("HTTP headers delimiter not found");
+        let headers = String::from_utf8_lossy(&resp_slice[..header_end]);
+        assert!(headers.starts_with("HTTP/1.1 200 OK"), "Expected 200 OK, got: {headers}");
+        assert!(headers.contains("application/x-apple-binary-plist"), "Expected binary plist content type");
+
+        let body = &resp_slice[header_end + 4..];
+        let plist_val = plist::Value::from_reader(std::io::Cursor::new(body))
+            .expect("Failed to parse binary plist from /info body");
+        let dict = plist_val.as_dictionary().expect("Expected plist dictionary");
+
+        assert_eq!(dict.get("model").and_then(|v| v.as_string()), Some("AudioAccessory6,1"));
+        let features = dict.get("features").and_then(|v| v.as_unsigned_integer()).expect("features integer");
+        const ATMOS_BIT: u64 = 1 << 56;
+        const SPATIAL_BIT: u64 = 1 << 51;
+        assert_eq!(features & ATMOS_BIT, ATMOS_BIT, "Dolby Atmos bit (56) must be set in /info features");
+        assert_eq!(features & SPATIAL_BIT, SPATIAL_BIT, "Spatial Audio bit (51) must be set in /info features");
 
         let _ = shutdown_tx.send(());
         let _ = task.await;

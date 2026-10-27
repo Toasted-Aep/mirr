@@ -384,8 +384,12 @@ fn is_self_broadcast(name: &str) -> bool {
     let cfg_name = crate::engines::get_config().broadcast_name;
     name.eq_ignore_ascii_case("Mirr")
         || name.eq_ignore_ascii_case("Mirr Audio")
+        || name.eq_ignore_ascii_case("Mirr (Dolby Atmos)")
+        || name.eq_ignore_ascii_case("Mirr Spatial Audio")
         || name.eq_ignore_ascii_case(&cfg_name)
         || name.eq_ignore_ascii_case(&format!("{cfg_name} Audio"))
+        || name.eq_ignore_ascii_case(&format!("{cfg_name} (Dolby Atmos)"))
+        || name.eq_ignore_ascii_case(&format!("{cfg_name} Spatial Audio"))
 }
 
 /// Begin browsing. Spawns background threads that live for the app's lifetime.
@@ -954,6 +958,12 @@ pub fn friendly_model(model: &str) -> String {
         "iPad14,1" | "iPad14,2" => "iPad mini (6th gen)",
         "iPad14,3" | "iPad14,4" => "iPad Pro 11-inch (4th gen)",
         "iPad14,5" | "iPad14,6" => "iPad Pro 12.9-inch (6th gen)",
+        // HomePod & Apple TV
+        "AudioAccessory1,1" | "AudioAccessory1,2" => "HomePod",
+        "AudioAccessory5,1" => "HomePod mini",
+        "AudioAccessory6,1" => "HomePod (2nd gen) · Spatial Audio",
+        "AppleTV11,1" | "AppleTV14,1" => "Apple TV 4K · Dolby Atmos",
+        "AppleTV6,2" | "AppleTV5,3" => "Apple TV HD / 4K",
         _ => {
             if m.starts_with("iPhone") {
                 "iPhone"
@@ -961,6 +971,10 @@ pub fn friendly_model(model: &str) -> String {
                 "iPad"
             } else if m.starts_with("Mac") {
                 "Mac"
+            } else if m.starts_with("AudioAccessory") {
+                "HomePod"
+            } else if m.starts_with("AppleTV") {
+                "Apple TV"
             } else {
                 m
             }
@@ -1015,7 +1029,7 @@ fn guess_kind(name: &str, model: &str) -> String {
         "mac"
     } else if s.contains("appletv") || s.contains("apple tv") {
         "tv"
-    } else if s.contains("homepod") || s.contains("audio") {
+    } else if s.contains("homepod") || s.contains("audio") || s.contains("audioaccessory") {
         "speaker"
     } else {
         "generic"
@@ -1088,7 +1102,16 @@ mod tests {
         assert_eq!(friendly_model("iPhone15,4"), "iPhone 15");
         assert_eq!(friendly_model("iPhone14,2"), "iPhone 13 Pro");
         assert_eq!(friendly_model("iPad13,4"), "iPad Pro 11-inch (3rd gen)");
+        assert_eq!(friendly_model("AudioAccessory6,1"), "HomePod (2nd gen) · Spatial Audio");
+        assert_eq!(friendly_model("AppleTV11,1"), "Apple TV 4K · Dolby Atmos");
         assert_eq!(friendly_model("CustomDevice"), "CustomDevice");
+    }
+
+    #[test]
+    fn test_is_self_broadcast() {
+        assert!(is_self_broadcast("Mirr"));
+        assert!(is_self_broadcast("Mirr (Dolby Atmos)"));
+        assert!(is_self_broadcast("Mirr Spatial Audio"));
     }
 
     static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

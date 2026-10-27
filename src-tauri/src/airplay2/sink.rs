@@ -27,8 +27,11 @@ pub struct WasapiSink {
 
 impl WasapiSink {
     pub fn new(rate_in: u32, channels_in: u8, target_device_name: Option<&str>) -> anyhow::Result<Self> {
+        let resolved_name = crate::audio::resolve_device_name(target_device_name);
+        let target_name_ref = resolved_name.as_deref().or(target_device_name);
+
         let host = cpal::default_host();
-        let device = match target_device_name {
+        let device = match target_name_ref {
             Some(name) if !name.is_empty() && name != "default" => {
                 let mut found = None;
                 if let Ok(devices) = host.output_devices() {
@@ -37,7 +40,10 @@ impl WasapiSink {
                             .description()
                             .map(|d| d.name().to_string())
                             .unwrap_or_else(|_| dev.to_string());
-                        if dev_name.contains(name) || name.contains(&dev_name) {
+                        if dev_name.eq_ignore_ascii_case(name)
+                            || dev_name.contains(name)
+                            || name.contains(&dev_name)
+                        {
                             found = Some(dev);
                             break;
                         }
@@ -61,6 +67,12 @@ impl WasapiSink {
         let sample_format = default_config.sample_format();
         let stream_config = default_config.config();
 
+        let spatial_caps = crate::audio::get_spatial_capabilities(target_device_name);
+        println!(
+            "[airplay2::sink] Initializing WASAPI stream: in={rate_in}Hz/{channels_in}ch, out={dev_sample_rate}Hz/{dev_channels}ch, format={sample_format:?}, Dolby Atmos={}, Tech='{}'",
+            spatial_caps.is_dolby_atmos, spatial_caps.spatial_technology
+        );
+
         let shared = Arc::new((
             Mutex::new(SharedQueue {
                 queue: VecDeque::with_capacity(MAX_BUFFER_SAMPLES * 2),
@@ -76,13 +88,13 @@ impl WasapiSink {
             stopped_cb.store(true, Ordering::SeqCst);
         };
 
+        let in_ch = (channels_in as usize).max(1);
+
         // State for resampler across callbacks
         let mut phase = 0.0f64;
         let step = rate_in as f64 / dev_sample_rate as f64;
-        let mut prev_l = 0i16;
-        let mut prev_r = 0i16;
-        let mut next_l = 0i16;
-        let mut next_r = 0i16;
+        let mut prev_frame = [0i16; 8];
+        let mut next_frame = [0i16; 8];
 
         let stream = match sample_format {
             cpal::SampleFormat::F32 => {
@@ -103,45 +115,104 @@ impl WasapiSink {
 
                         if state.flushed {
                             phase = 0.0;
-                            prev_l = 0;
-                            prev_r = 0;
-                            next_l = 0;
-                            next_r = 0;
+                            prev_frame = [0; 8];
+                            next_frame = [0; 8];
                             state.flushed = false;
                         }
 
                         let frames = data.len() / dev_channels.max(1);
                         let same_rate = rate_in == dev_sample_rate;
-                        let is_mono = channels_in == 1;
 
                         for f in 0..frames {
-                            let (out_l, out_r) = if same_rate {
-                                let l = state.queue.pop_front().unwrap_or(0);
-                                let r = if is_mono { l } else { state.queue.pop_front().unwrap_or(0) };
-                                (l as f32 / 32768.0, r as f32 / 32768.0)
+                            let mut in_frame = [0i16; 8];
+                            if same_rate {
+                                for ch in 0..in_ch.min(8) {
+                                    in_frame[ch] = state.queue.pop_front().unwrap_or(0);
+                                }
+                                for _ in 8..in_ch {
+                                    let _ = state.queue.pop_front();
+                                }
                             } else {
                                 let frac = phase as f32;
-                                let l = (prev_l as f32 * (1.0 - frac) + next_l as f32 * frac) / 32768.0;
-                                let r = (prev_r as f32 * (1.0 - frac) + next_r as f32 * frac) / 32768.0;
+                                for ch in 0..in_ch.min(8) {
+                                    let p = prev_frame[ch] as f32;
+                                    let n = next_frame[ch] as f32;
+                                    in_frame[ch] = (p * (1.0 - frac) + n * frac) as i16;
+                                }
                                 phase += step;
                                 while phase >= 1.0 {
                                     phase -= 1.0;
-                                    prev_l = next_l;
-                                    prev_r = next_r;
-                                    next_l = state.queue.pop_front().unwrap_or(0);
-                                    next_r = if is_mono { next_l } else { state.queue.pop_front().unwrap_or(0) };
+                                    prev_frame = next_frame;
+                                    for ch in 0..in_ch.min(8) {
+                                        next_frame[ch] = state.queue.pop_front().unwrap_or(0);
+                                    }
+                                    for _ in 8..in_ch {
+                                        let _ = state.queue.pop_front();
+                                    }
                                 }
-                                (l, r)
-                            };
+                            }
 
                             let base = f * dev_channels;
-                            if dev_channels == 1 {
-                                data[base] = (out_l + out_r) * 0.5;
+                            if in_ch == 1 {
+                                let m = in_frame[0] as f32 / 32768.0;
+                                data[base] = m;
+                                if dev_channels >= 2 { data[base + 1] = m; }
+                                for ch in 2..dev_channels { data[base + ch] = 0.0; }
+                            } else if in_ch == 2 {
+                                let l = in_frame[0] as f32 / 32768.0;
+                                let r = in_frame[1] as f32 / 32768.0;
+                                if dev_channels == 1 {
+                                    data[base] = (l + r) * 0.5;
+                                } else if dev_channels == 2 {
+                                    data[base] = l;
+                                    data[base + 1] = r;
+                                } else {
+                                    // Multi-channel spatial speaker layout (ITU-R BS.775 / 5.1 / 7.1 / Dolby Atmos surround bed)
+                                    let center = (l + r) * 0.7071;
+                                    let lfe = (l + r) * 0.5;
+                                    let ls = (l - 0.5 * r) * 0.7071;
+                                    let rs = (r - 0.5 * l) * 0.7071;
+                                    data[base] = l;
+                                    data[base + 1] = r;
+                                    data[base + 2] = center;
+                                    if dev_channels >= 4 { data[base + 3] = lfe; }
+                                    if dev_channels >= 5 { data[base + 4] = ls; }
+                                    if dev_channels >= 6 { data[base + 5] = rs; }
+                                    if dev_channels >= 7 { data[base + 6] = (l - r) * 0.5; }
+                                    if dev_channels >= 8 { data[base + 7] = (r - l) * 0.5; }
+                                    for ch in 8..dev_channels {
+                                        data[base + ch] = 0.0;
+                                    }
+                                }
                             } else {
-                                data[base] = out_l;
-                                data[base + 1] = out_r;
-                                for ch in 2..dev_channels {
-                                    data[base + ch] = 0.0;
+                                // Multichannel input (5.1 / 7.1 / Atmos bed)
+                                let l = in_frame[0] as f32 / 32768.0;
+                                let r = in_frame[1] as f32 / 32768.0;
+                                let c = in_frame[2] as f32 / 32768.0;
+                                let lfe = in_frame[3] as f32 / 32768.0;
+                                let ls = in_frame[4] as f32 / 32768.0;
+                                let rs = in_frame[5] as f32 / 32768.0;
+                                let rbl = in_frame[6] as f32 / 32768.0;
+                                let rbr = in_frame[7] as f32 / 32768.0;
+
+                                if dev_channels == 1 {
+                                    data[base] = ((l + r + c * 1.414 + ls + rs) * 0.25).clamp(-1.0, 1.0);
+                                } else if dev_channels == 2 {
+                                    // Downmix to stereo
+                                    data[base] = (l + 0.7071 * c + 0.7071 * ls + 0.5 * rbl).clamp(-1.0, 1.0);
+                                    data[base + 1] = (r + 0.7071 * c + 0.7071 * rs + 0.5 * rbr).clamp(-1.0, 1.0);
+                                } else {
+                                    data[base] = l;
+                                    data[base + 1] = r;
+                                    data[base + 2] = c;
+                                    if dev_channels >= 4 { data[base + 3] = lfe; }
+                                    if dev_channels >= 5 { data[base + 4] = ls; }
+                                    if dev_channels >= 6 { data[base + 5] = rs; }
+                                    if dev_channels >= 7 { data[base + 6] = rbl; }
+                                    if dev_channels >= 8 { data[base + 7] = rbr; }
+                                    for ch in 8..dev_channels {
+                                        data[base + ch] = 0.0;
+                                    }
                                 }
                             }
                         }
@@ -170,45 +241,105 @@ impl WasapiSink {
 
                         if state.flushed {
                             phase = 0.0;
-                            prev_l = 0;
-                            prev_r = 0;
-                            next_l = 0;
-                            next_r = 0;
+                            prev_frame = [0; 8];
+                            next_frame = [0; 8];
                             state.flushed = false;
                         }
 
                         let frames = data.len() / dev_channels.max(1);
                         let same_rate = rate_in == dev_sample_rate;
-                        let is_mono = channels_in == 1;
 
                         for f in 0..frames {
-                            let (out_l, out_r) = if same_rate {
-                                let l = state.queue.pop_front().unwrap_or(0);
-                                let r = if is_mono { l } else { state.queue.pop_front().unwrap_or(0) };
-                                (l, r)
+                            let mut in_frame = [0i16; 8];
+                            if same_rate {
+                                for ch in 0..in_ch.min(8) {
+                                    in_frame[ch] = state.queue.pop_front().unwrap_or(0);
+                                }
+                                for _ in 8..in_ch {
+                                    let _ = state.queue.pop_front();
+                                }
                             } else {
                                 let frac = phase as f32;
-                                let l = (prev_l as f32 * (1.0 - frac) + next_l as f32 * frac) as i16;
-                                let r = (prev_r as f32 * (1.0 - frac) + next_r as f32 * frac) as i16;
+                                for ch in 0..in_ch.min(8) {
+                                    let p = prev_frame[ch] as f32;
+                                    let n = next_frame[ch] as f32;
+                                    in_frame[ch] = (p * (1.0 - frac) + n * frac) as i16;
+                                }
                                 phase += step;
                                 while phase >= 1.0 {
                                     phase -= 1.0;
-                                    prev_l = next_l;
-                                    prev_r = next_r;
-                                    next_l = state.queue.pop_front().unwrap_or(0);
-                                    next_r = if is_mono { next_l } else { state.queue.pop_front().unwrap_or(0) };
+                                    prev_frame = next_frame;
+                                    for ch in 0..in_ch.min(8) {
+                                        next_frame[ch] = state.queue.pop_front().unwrap_or(0);
+                                    }
+                                    for _ in 8..in_ch {
+                                        let _ = state.queue.pop_front();
+                                    }
                                 }
-                                (l, r)
-                            };
+                            }
 
                             let base = f * dev_channels;
-                            if dev_channels == 1 {
-                                data[base] = (((out_l as i32) + (out_r as i32)) / 2) as i16;
+                            if in_ch == 1 {
+                                let m = in_frame[0];
+                                data[base] = m;
+                                if dev_channels >= 2 { data[base + 1] = m; }
+                                for ch in 2..dev_channels { data[base + ch] = 0; }
+                            } else if in_ch == 2 {
+                                let l = in_frame[0];
+                                let r = in_frame[1];
+                                if dev_channels == 1 {
+                                    data[base] = (((l as i32) + (r as i32)) / 2) as i16;
+                                } else if dev_channels == 2 {
+                                    data[base] = l;
+                                    data[base + 1] = r;
+                                } else {
+                                    let l_f = l as f32;
+                                    let r_f = r as f32;
+                                    let center = (((l_f + r_f) * 0.7071) as i32).clamp(-32768, 32767) as i16;
+                                    let lfe = (((l_f + r_f) * 0.5) as i32).clamp(-32768, 32767) as i16;
+                                    let ls = (((l_f - 0.5 * r_f) * 0.7071) as i32).clamp(-32768, 32767) as i16;
+                                    let rs = (((r_f - 0.5 * l_f) * 0.7071) as i32).clamp(-32768, 32767) as i16;
+                                    data[base] = l;
+                                    data[base + 1] = r;
+                                    data[base + 2] = center;
+                                    if dev_channels >= 4 { data[base + 3] = lfe; }
+                                    if dev_channels >= 5 { data[base + 4] = ls; }
+                                    if dev_channels >= 6 { data[base + 5] = rs; }
+                                    if dev_channels >= 7 { data[base + 6] = (((l_f - r_f) * 0.5) as i32).clamp(-32768, 32767) as i16; }
+                                    if dev_channels >= 8 { data[base + 7] = (((r_f - l_f) * 0.5) as i32).clamp(-32768, 32767) as i16; }
+                                    for ch in 8..dev_channels {
+                                        data[base + ch] = 0;
+                                    }
+                                }
                             } else {
-                                data[base] = out_l;
-                                data[base + 1] = out_r;
-                                for ch in 2..dev_channels {
-                                    data[base + ch] = 0;
+                                let l = in_frame[0];
+                                let r = in_frame[1];
+                                let c = in_frame[2];
+                                let lfe = in_frame[3];
+                                let ls = in_frame[4];
+                                let rs = in_frame[5];
+                                let rbl = in_frame[6];
+                                let rbr = in_frame[7];
+
+                                if dev_channels == 1 {
+                                    data[base] = ((((l as i32) + (r as i32) + ((c as f32 * 1.414) as i32) + (ls as i32) + (rs as i32)) / 4).clamp(-32768, 32767)) as i16;
+                                } else if dev_channels == 2 {
+                                    let l_down = (l as f32 + 0.7071 * (c as f32) + 0.7071 * (ls as f32) + 0.5 * (rbl as f32)) as i32;
+                                    let r_down = (r as f32 + 0.7071 * (c as f32) + 0.7071 * (rs as f32) + 0.5 * (rbr as f32)) as i32;
+                                    data[base] = l_down.clamp(-32768, 32767) as i16;
+                                    data[base + 1] = r_down.clamp(-32768, 32767) as i16;
+                                } else {
+                                    data[base] = l;
+                                    data[base + 1] = r;
+                                    data[base + 2] = c;
+                                    if dev_channels >= 4 { data[base + 3] = lfe; }
+                                    if dev_channels >= 5 { data[base + 4] = ls; }
+                                    if dev_channels >= 6 { data[base + 5] = rs; }
+                                    if dev_channels >= 7 { data[base + 6] = rbl; }
+                                    if dev_channels >= 8 { data[base + 7] = rbr; }
+                                    for ch in 8..dev_channels {
+                                        data[base + ch] = 0;
+                                    }
                                 }
                             }
                         }
@@ -230,7 +361,7 @@ impl WasapiSink {
             shared,
             stopped,
             _stream: stream,
-            channels: channels_in.max(1) as usize,
+            channels: in_ch,
         })
     }
 }
@@ -432,6 +563,27 @@ mod tests {
         assert_eq!(queue.len() % channels, 0);
         let first = queue.front().copied().unwrap();
         assert_eq!(first % 10, 0, "Channel alignment must not swap left/right: got {first}");
+    }
+
+    #[test]
+    fn test_multichannel_5_1_and_7_1_frame_alignment() {
+        for in_channels in [6usize, 8usize] {
+            let mut queue: VecDeque<i16> = VecDeque::new();
+            for frame_idx in 0..50 {
+                for ch in 0..in_channels {
+                    queue.push_back((frame_idx * 100 + ch) as i16);
+                }
+            }
+            let max_keep = 100usize;
+            if queue.len() > max_keep {
+                let mut excess = queue.len() - max_keep;
+                excess -= excess % in_channels;
+                queue.drain(0..excess);
+            }
+            assert_eq!(queue.len() % in_channels, 0, "Multichannel frame must stay channel-aligned");
+            let first = queue.front().copied().unwrap();
+            assert_eq!(first % 100, 0, "First channel in frame must be Left (channel 0)");
+        }
     }
 }
 
