@@ -127,7 +127,7 @@ pub fn set_config(mut cfg: EngineConfig) -> EngineConfig {
 /// Kill-on-close Job Object shared by every engine child: if Mirr dies for any
 /// reason (including a crash), the OS reaps the engines with it.
 #[cfg(windows)]
-mod job {
+pub(crate) mod job {
     use once_cell::sync::Lazy;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::JobObjects::{
@@ -537,36 +537,11 @@ pub fn stop_airplay_receiver(app: &AppHandle) {
 
 /// Start AirCast: capture this PC's audio (WASAPI loopback) and stream to `target_ip`.
 pub fn start_aircast(app: &AppHandle, target_ip: &str) -> anyhow::Result<()> {
-    let path = engine_path(app, "aircast.exe")?;
-    if !path.is_file() {
-        return Err(anyhow::anyhow!(
-            "AirCast engine (engines/aircast.exe) is not bundled yet"
-        ));
-    }
-    let mut st = STATE.lock().unwrap();
-    // retarget: never leak a second concurrent capture process
-    if let Some(mut old) = st.aircast.take() {
-        let _ = old.kill();
-        let _ = old.wait();
-    }
-    let mut cmd = Command::new(path);
-    cmd.args(["--target", target_ip, "--source", "wasapi-loopback"]);
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let child = cmd
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("failed to start AirCast engine: {e}"))?;
-    #[cfg(windows)]
-    job::assign(&child);
-    st.aircast = Some(child);
-    Ok(())
+    crate::aircast::start_aircast(app, target_ip)
 }
 
 pub fn stop_aircast() {
-    if let Some(mut c) = STATE.lock().unwrap().aircast.take() {
-        let _ = c.kill();
-        let _ = c.wait();
-    }
+    crate::aircast::stop_aircast();
 }
 
 /// Start the AirPlay 2 lossless audio receiver (pure Rust in-process engine).
@@ -604,5 +579,7 @@ pub fn shutdown_all() {
         *child = None;
     }
     crate::airplay2::stop(None);
+    crate::aircast::stop_aircast();
+    crate::aircast::scrcpy::stop_scrcpy();
     clean_export_files();
 }

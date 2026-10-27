@@ -2410,6 +2410,62 @@ async function loadFromBackend() {
       updatePlayIcon(!isPaused);
     });
 
+    // AirCast & Google Cast discovery events
+    listen("cast://targets", () => {
+      if (typeof refreshTargets === "function") refreshTargets();
+    });
+    listen("aircast://status", (e) => {
+      const p = e.payload || {};
+      if (p.state === "streaming") {
+        toast(`Casting to ${p.target}`);
+        const w = $("castwave");
+        if (w) w.classList.add("on");
+        const b = $("castPlay");
+        if (b) b.textContent = "⏸ Streaming";
+      } else if (p.state === "disconnected") {
+        toast(`Cast disconnected: ${p.target || "Speaker"}`, true);
+        const w = $("castwave");
+        if (w) w.classList.remove("on");
+        const b = $("castPlay");
+        if (b) b.textContent = "▶ Stream";
+        const sw = $("rooms") ? $("rooms").querySelector(".switch.on") : null;
+        if (sw) {
+          sw.classList.remove("on");
+          sw.setAttribute("aria-checked", "false");
+        }
+      }
+    });
+
+    // Inbound DIAL (YouTube) & UPnP/DLNA media events
+    listen("dial://launch", (e) => {
+      const p = e.payload || {};
+      toast(`Cast received: ${p.app || "Media"} from phone`);
+      if (p.videoId) {
+        toast(`YouTube video: https://youtu.be/${p.videoId}`);
+      }
+    });
+    listen("dlna://media", (e) => {
+      const p = e.payload || {};
+      if (p.state === "playing" || p.state === "loaded") {
+        toast(`DLNA Cast: ${p.title || "Media"}${p.artist ? " — " + p.artist : ""}`);
+      }
+    });
+
+    // Scrcpy Android Mirror trigger
+    const scrcpyChip = $("scrcpyMirrorChip");
+    if (scrcpyChip) {
+      scrcpyChip.addEventListener("click", () => {
+        const ip = prompt("Enter Android Phone IP for wireless mirroring (or leave blank for USB):");
+        if (ip !== null) {
+          toast("Starting 60fps Android Mirror via Scrcpy...");
+          invoke("scrcpy_start", { target: ip.trim() || null }).then(
+            () => toast("Android screen docked into Mirr!"),
+            (err) => toast("Scrcpy: " + err, true)
+          );
+        }
+      });
+    }
+
     // Query initial AirPlay 2 state
     const a2St = await invoke("airplay2_state").catch(() => null);
     if (a2St && typeof a2St.running === "boolean") {

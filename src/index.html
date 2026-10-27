@@ -97,6 +97,7 @@
                 <div class="idle-pills">
                   <span class="idle-chip">AirPlay Screen 60fps</span>
                   <span class="idle-chip">Lossless Audio</span>
+                  <span class="idle-chip" id="scrcpyMirrorChip" role="button" tabindex="0">Android Mirror 60fps</span>
                   <span class="idle-chip" id="idleDropChip" role="button" tabindex="0">Drop Files for LocalSend</span>
                 </div>
                 <button class="btn" id="rxRetry" type="button" hidden>Restart receiver</button>
@@ -298,14 +299,14 @@
             <div class="albumart"></div>
             <div class="info">
               <div class="track">This PC’s audio</div>
-              <div class="artist">Captured via WASAPI loopback → streamed over RAOP</div>
+              <div class="artist">Captured via WASAPI loopback with silence injection → Google Cast &amp; AirPlay</div>
               <div class="wave" id="castwave"></div>
             </div>
             <button class="btn" id="castPlay" type="button">▶ Stream</button>
           </div>
-          <div class="section-h">Cast to AirPlay speakers on your network</div>
+          <div class="section-h">Cast to Google Cast &amp; AirPlay speakers on your network</div>
           <div id="rooms"></div>
-          <div class="notice warn">Classic AirPlay targets work via RAOP (<code>pyatv</code>). AirPlay-2-only devices (e.g. HomePod) need pairing &amp; encryption and aren’t guaranteed without an Apple license.</div>
+          <div class="notice good"><b>Outbound Cast Active:</b> Google Cast speakers stream direct via pure-Rust <code>rust_cast</code> with WASAPI loopback audio chunking. AirPlay &amp; UPnP speakers bridge via AirConnect.</div>
         </div>
 
         <!-- LOCALSEND -->

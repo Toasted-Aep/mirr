@@ -2,6 +2,7 @@
 // AirPlay (receive) · AirPlay 2 (audio) · AirCast (send) · LocalSend (transfer)
 #![windows_subsystem = "windows"]
 
+mod aircast;
 mod airplay2;
 mod audio;
 mod dacp;
@@ -26,7 +27,18 @@ fn list_airplay_devices() -> Vec<discovery::Device> {
 
 #[tauri::command]
 fn list_airplay_targets() -> Vec<discovery::Target> {
-    discovery::raop_targets()
+    let mut targets = discovery::raop_targets();
+    for ct in aircast::discovery::list_cast_targets() {
+        targets.push(discovery::Target {
+            name: ct.name,
+            meta: ct.meta,
+            on: aircast::cast_sender::is_casting()
+                && aircast::cast_sender::current_target().as_deref() == Some(&ct.addr),
+            vol: 100,
+            addr: ct.addr,
+        });
+    }
+    targets
 }
 
 #[tauri::command]
@@ -307,6 +319,41 @@ fn stop_aircast() {
 }
 
 #[tauri::command]
+fn aircast_state() -> serde_json::Value {
+    aircast::aircast_state()
+}
+
+#[tauri::command]
+fn list_cast_targets() -> Vec<aircast::discovery::CastTarget> {
+    aircast::discovery::list_cast_targets()
+}
+
+#[tauri::command]
+fn scrcpy_start(app: tauri::AppHandle, target: Option<String>) -> Result<(), String> {
+    aircast::scrcpy::start_scrcpy(&app, target).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn scrcpy_stop() {
+    aircast::scrcpy::stop_scrcpy();
+}
+
+#[tauri::command]
+fn scrcpy_status() -> bool {
+    aircast::scrcpy::is_scrcpy_running()
+}
+
+#[tauri::command]
+fn scrcpy_list_devices(app: tauri::AppHandle) -> Vec<aircast::scrcpy::AdbDevice> {
+    aircast::scrcpy::list_adb_devices(Some(&app))
+}
+
+#[tauri::command]
+fn scrcpy_connect_wireless(app: tauri::AppHandle, ip: String) -> Result<String, String> {
+    aircast::scrcpy::connect_wireless_adb(Some(&app), &ip).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn start_airplay2_receiver(app: tauri::AppHandle) -> Result<(), String> {
     engines::start_airplay2_receiver(&app).map_err(|e| e.to_string())
 }
@@ -365,6 +412,8 @@ fn main() {
             }
             // LocalSend multicast discovery + HTTP receive server
             localsend::start(app.handle().clone());
+            // AirCast: HTTP chunked stream server, Google Cast discovery, DIAL/SSDP responders
+            aircast::init(&app.handle().clone());
             // Windows audio output device watcher & auto-switching
             audio::ensure_watcher(app.handle().clone());
             // Auto-start engines based on configured receiver_mode
@@ -427,6 +476,13 @@ fn main() {
             dacp_prev,
             start_aircast,
             stop_aircast,
+            aircast_state,
+            list_cast_targets,
+            scrcpy_start,
+            scrcpy_stop,
+            scrcpy_status,
+            scrcpy_list_devices,
+            scrcpy_connect_wireless,
             start_airplay2_receiver,
             stop_airplay2_receiver,
             airplay2_state,
