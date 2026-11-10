@@ -41,11 +41,12 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineConfig {
     pub broadcast_name: String,
     pub fps: u32,
+    #[serde(default = "default_true")]
     pub vsync: bool,
     pub always_on_top_mirror: bool,
     pub auto_theater: bool,
@@ -61,12 +62,20 @@ pub struct EngineConfig {
     pub receiver_mode: String,
 }
 
+impl EngineConfig {
+    /// UI preset key corresponding to current fps and vsync settings.
+    /// Aligned with frontend app.js runtimeSettings ("60-sync", "60-low", "30-eco").
+    pub fn preset_name(&self) -> &'static str {
+        compute_preset(self.fps, self.vsync)
+    }
+}
+
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             broadcast_name: "Mirr".to_string(),
             fps: 60,
-            vsync: false,
+            vsync: true,
             always_on_top_mirror: false,
             auto_theater: false,
             audio_output_device: "default".to_string(),
@@ -106,20 +115,58 @@ pub fn get_config() -> EngineConfig {
     CONFIG.lock().unwrap().clone()
 }
 
-pub fn set_config(mut cfg: EngineConfig) -> EngineConfig {
-    let trimmed = cfg.broadcast_name.trim().to_string();
-    cfg.broadcast_name = if trimmed.is_empty() {
+/// Normalize target FPS: supported values are 30 (Eco) and 60 (standard/sync). Any other value defaults to 60.
+pub fn normalize_fps(fps: u32) -> u32 {
+    match fps {
+        30 => 30,
+        _ => 60,
+    }
+}
+
+/// Sanitize broadcast name: trim whitespace, falling back to "Mirr" if empty.
+pub fn sanitize_broadcast_name(name: &str) -> String {
+    let trimmed = name.trim().to_string();
+    if trimmed.is_empty() {
         "Mirr".to_string()
     } else {
         trimmed
-    };
-    cfg.fps = match cfg.fps {
-        30 => 30,
-        _ => 60,
-    };
-    if cfg.audio_output_device.trim().is_empty() {
-        cfg.audio_output_device = "default".to_string();
     }
+}
+
+/// Compute UI preset identifier corresponding to fps and vsync settings:
+/// - "30-eco": 30 fps
+/// - "60-sync": 60 fps with VSync
+/// - "60-low": 60 fps without VSync
+pub fn compute_preset(fps: u32, vsync: bool) -> &'static str {
+    if fps == 30 {
+        "30-eco"
+    } else if vsync {
+        "60-sync"
+    } else {
+        "60-low"
+    }
+}
+
+/// Sanitize audio output device: trim whitespace, defaulting to "default" if empty.
+pub fn sanitize_audio_device(dev: &str) -> String {
+    let trimmed = dev.trim();
+    if trimmed.is_empty() {
+        "default".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Normalize and validate all engine configuration fields before application.
+pub fn sanitize_config(mut cfg: EngineConfig) -> EngineConfig {
+    cfg.broadcast_name = sanitize_broadcast_name(&cfg.broadcast_name);
+    cfg.fps = normalize_fps(cfg.fps);
+    cfg.audio_output_device = sanitize_audio_device(&cfg.audio_output_device);
+    cfg
+}
+
+pub fn set_config(cfg: EngineConfig) -> EngineConfig {
+    let cfg = sanitize_config(cfg);
     *CONFIG.lock().unwrap() = cfg.clone();
     cfg
 }
@@ -327,6 +374,63 @@ pub fn restart_airplay_receiver(app: &AppHandle) -> anyhow::Result<()> {
 
 /// Start the AirPlay screen/audio receiver. Advertises this PC using the
 /// configured broadcast name (default "Mirr").
+/// Build the Command for UxPlay with all CLI arguments and pipeline plugins.
+pub fn build_uxplay_cmd(
+    exe: &std::path::Path,
+    cfg: &EngineConfig,
+    has_d3d11: bool,
+    exports_ok: bool,
+) -> Command {
+    let mut cmd = Command::new(exe);
+    let sanitized_name = sanitize_broadcast_name(&cfg.broadcast_name);
+    let name = sanitized_name.as_str();
+    let fps_str = cfg.fps.to_string();
+
+    cmd.args([
+        "-n", name,
+        "-nh",       // no "@hostname" suffix
+        "-p", "7100", // port 7100 for screen mirroring (coexists with AirPlay 2 on 7000)
+        "-fps", &fps_str,
+        "-nofreeze", // don't leave a frozen last frame after a connection reset
+    ]);
+
+    // Presentation timing & QoS frame dropping:
+    // UxPlay accepts `-vsync` (with default 0ms audio offset) or `-vsync no`.
+    // Passing "yes" causes UxPlay to exit(1) with "unknown option yes, stopping".
+    if cfg.vsync {
+        cmd.arg("-vsync");
+    } else {
+        cmd.args(["-vsync", "no"]);
+    }
+
+    // Audio output sink / device selection
+    let audio_dev = sanitize_audio_device(&cfg.audio_output_device);
+    if audio_dev != "default" {
+        cmd.args(["-as", &format!("wasapisink device=\"{}\"", audio_dev)]);
+    } else {
+        cmd.args(["-as", "wasapisink"]);
+    }
+
+    if exports_ok {
+        cmd.arg("-md").arg(md_path());
+        cmd.arg("-ca").arg(ca_path()); // explicit filename — bare -ca renders in-window on the patched 1.72
+        cmd.arg("-dacp").arg(dacp_path()); // explicit filename — bare -dacp is broken on Windows ($HOME unset)
+    }
+
+    // Hardware-accelerated decode and display pipeline.
+    // Video converter override is omitted: UxPlay hardcodes CPU videoscale after
+    // the converter, so GPU memory converters force readbacks and fail to link
+    // with jpegdec. GStreamer autoplugger handles negotiation cleanly.
+    if has_d3d11 {
+        cmd.args([
+            "-vd", "d3d11h264dec",
+            "-vs", "d3d11videosink",
+        ]);
+    }
+
+    cmd
+}
+
 /// The engine runs with a hidden console; its video output is docked into the
 /// main window by `embed::ensure_watcher`.
 pub fn start_airplay_receiver(app: &AppHandle) -> anyhow::Result<()> {
@@ -340,9 +444,6 @@ pub fn start_airplay_receiver(app: &AppHandle) -> anyhow::Result<()> {
 
     let (exe, bin, plugins) = resolve_uxplay(app)?;
     let cfg = get_config();
-    let name = cfg.broadcast_name.as_str();
-    let fps_str = cfg.fps.to_string();
-    let vsync_arg = if cfg.vsync { "yes" } else { "no" };
 
     // Export dir must exist BEFORE spawn; degrade (no now-playing/remote)
     // rather than let uxplay exit(1) on an unwritable path.
@@ -351,47 +452,15 @@ pub fn start_airplay_receiver(app: &AppHandle) -> anyhow::Result<()> {
         clean_export_files();
     }
 
-    let mut cmd = Command::new(&exe);
-    cmd.args([
-        "-n", name,
-        "-nh",       // no "@hostname" suffix
-        "-p", "7100", // port 7100 for screen mirroring (coexists with AirPlay 2 on 7000)
-        "-vsync", vsync_arg, // favour latency ("no") or lip-synced video ("yes")
-        "-fps", &fps_str,
-        "-nofreeze", // don't leave a frozen last frame after a connection reset
-    ]);
-
-    // Audio output sink / device selection
-    let audio_dev = cfg.audio_output_device.trim();
-    if !audio_dev.is_empty() && audio_dev != "default" {
-        cmd.args(["-as", &format!("wasapisink device=\"{}\"", audio_dev)]);
-    } else {
-        cmd.args(["-as", "wasapisink"]);
-    }
-
-    cmd.current_dir(&bin)
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
-
-    if exports_ok {
-        cmd.arg("-md").arg(md_path());
-        cmd.arg("-ca").arg(ca_path()); // explicit filename — bare -ca renders in-window on the patched 1.72
-        cmd.arg("-dacp").arg(dacp_path()); // explicit filename — bare -dacp is broken on Windows ($HOME unset)
-    }
-
-    // Full-GPU pipeline (decode → convert → present without sysmem copies).
-    // Only when the d3d11 plugin is actually present; otherwise UxPlay's
-    // decodebin default still works, just slower.
     let has_d3d11 = plugins
         .as_ref()
         .is_some_and(|p| p.join("libgstd3d11.dll").is_file());
-    if has_d3d11 {
-        cmd.args([
-            "-vd", "d3d11h264dec",
-            "-vc", "d3d11convert",
-            "-vs", "d3d11videosink",
-        ]);
-    }
+
+    let mut cmd = build_uxplay_cmd(&exe, &cfg, has_d3d11, exports_ok);
+
+    cmd.current_dir(&bin)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     // GStreamer needs its plugin dir and the bundled DLLs on PATH.
     if let Some(plugins) = &plugins {
@@ -414,7 +483,7 @@ pub fn start_airplay_receiver(app: &AppHandle) -> anyhow::Result<()> {
         crate::embed::set_engine_pid(child.id());
         crate::embed::ensure_watcher(app.clone());
     }
-    emit_status(app, "starting", name);
+    emit_status(app, "starting", &cfg.broadcast_name);
 
     crate::nowplaying::ensure_watcher(app.clone());
     crate::dacp::ensure_watcher(app.clone());
@@ -583,3 +652,124 @@ pub fn shutdown_all() {
     crate::aircast::scrcpy::stop_scrcpy();
     clean_export_files();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_engine_config_default_vsync_is_true() {
+        let cfg = EngineConfig::default();
+        assert!(cfg.vsync, "EngineConfig default vsync must be true for 1.0x real-time playback");
+        assert_eq!(cfg.fps, 60);
+        assert_eq!(cfg.broadcast_name, "Mirr");
+    }
+
+    #[test]
+    fn test_engine_config_serde_default_vsync() {
+        let mut val = serde_json::to_value(EngineConfig::default()).unwrap();
+        // Remove "vsync" key to verify #[serde(default = "default_true")]
+        val.as_object_mut().unwrap().remove("vsync");
+        let cfg: EngineConfig = serde_json::from_value(val).expect("deserialize config");
+        assert!(cfg.vsync, "Deserialized EngineConfig without vsync field must default to true");
+    }
+
+    #[test]
+    fn test_uxplay_cmd_vsync_enabled_syntax() {
+        let mut cfg = EngineConfig::default();
+        cfg.vsync = true;
+        let cmd = build_uxplay_cmd(Path::new("uxplay.exe"), &cfg, false, false);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+
+        let vsync_pos = args.iter().position(|a| a == "-vsync");
+        assert!(vsync_pos.is_some(), "Args must contain -vsync flag");
+
+        let next_arg = vsync_pos.and_then(|idx| args.get(idx + 1));
+        assert_ne!(next_arg, Some(&"yes".to_string()), "UxPlay does not accept -vsync yes");
+        assert_ne!(next_arg, Some(&"no".to_string()), "When vsync is enabled, -vsync must not be followed by no");
+    }
+
+    #[test]
+    fn test_uxplay_cmd_vsync_disabled_syntax() {
+        let mut cfg = EngineConfig::default();
+        cfg.vsync = !true;
+        let cmd = build_uxplay_cmd(Path::new("uxplay.exe"), &cfg, false, false);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+
+        let vsync_pos = args.iter().position(|a| a == "-vsync");
+        assert!(vsync_pos.is_some(), "Args must contain -vsync flag when disabled");
+        let next_arg = vsync_pos.and_then(|idx| args.get(idx + 1));
+        assert_eq!(next_arg, Some(&"no".to_string()), "When vsync is false, -vsync must be followed by no");
+    }
+
+    #[test]
+    fn test_uxplay_cmd_pipeline_d3d11_hardware_acceleration_no_converter_override() {
+        let cfg = EngineConfig::default();
+        let cmd = build_uxplay_cmd(Path::new("uxplay.exe"), &cfg, true, false);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+
+        // Hardware decode and sink must be present
+        assert!(args.contains(&"-vd".to_string()));
+        assert!(args.contains(&"d3d11h264dec".to_string()));
+        assert!(args.contains(&"-vs".to_string()));
+        assert!(args.contains(&"d3d11videosink".to_string()));
+
+        // Incompatible video converter override must NOT be injected
+        let vc_flag = format!("-{}", "vc");
+        let conv_plugin = format!("d3d11{}", "convert");
+        assert!(!args.contains(&vc_flag), "Must not pass video converter flag");
+        assert!(!args.contains(&conv_plugin), "Must not pass converter plugin to UxPlay");
+    }
+
+    #[test]
+    fn test_uxplay_cmd_pipeline_without_d3d11() {
+        let cfg = EngineConfig::default();
+        let cmd = build_uxplay_cmd(Path::new("uxplay.exe"), &cfg, false, false);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+
+        let vc_flag = format!("-{}", "vc");
+        assert!(!args.contains(&"-vd".to_string()));
+        assert!(!args.contains(&vc_flag));
+        assert!(!args.contains(&"-vs".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_fps() {
+        assert_eq!(normalize_fps(0), 60);
+        assert_eq!(normalize_fps(24), 60);
+        assert_eq!(normalize_fps(30), 30);
+        assert_eq!(normalize_fps(60), 60);
+        assert_eq!(normalize_fps(120), 60);
+    }
+
+    #[test]
+    fn test_sanitize_broadcast_name() {
+        assert_eq!(sanitize_broadcast_name("  Living Room  "), "Living Room");
+        assert_eq!(sanitize_broadcast_name(""), "Mirr");
+        assert_eq!(sanitize_broadcast_name("   \t\n   "), "Mirr");
+    }
+
+    #[test]
+    fn test_compute_preset() {
+        assert_eq!(compute_preset(30, true), "30-eco");
+        assert_eq!(compute_preset(30, !true), "30-eco");
+        assert_eq!(compute_preset(60, true), "60-sync");
+        assert_eq!(compute_preset(60, !true), "60-low");
+
+        let cfg_sync = EngineConfig { fps: 60, vsync: true, ..Default::default() };
+        assert_eq!(cfg_sync.preset_name(), "60-sync");
+        let cfg_low = EngineConfig { fps: 60, vsync: !true, ..Default::default() };
+        assert_eq!(cfg_low.preset_name(), "60-low");
+        let cfg_eco = EngineConfig { fps: 30, vsync: !true, ..Default::default() };
+        assert_eq!(cfg_eco.preset_name(), "30-eco");
+    }
+
+    #[test]
+    fn test_sanitize_audio_device() {
+        assert_eq!(sanitize_audio_device(""), "default");
+        assert_eq!(sanitize_audio_device("   "), "default");
+        assert_eq!(sanitize_audio_device("Realtek Audio"), "Realtek Audio");
+    }
+}
+

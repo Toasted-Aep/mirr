@@ -56,7 +56,7 @@ let currentBroadcastName = "Mirr";
 let runtimeSettings = {
   broadcastName: "Mirr",
   fps: 60,
-  vsync: false,
+  vsync: true,
   alwaysOnTopMirror: false,
   autoTheater: false,
   audioOutputDevice: "default",
@@ -2024,7 +2024,8 @@ $("setSaveName").addEventListener("click", () => {
 $("setBroadcastInput").addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("setSaveName").click();
 });
-document.querySelectorAll("#setPresetGroup .seg-btn").forEach((btn) => {
+// Preset and vsync synchronization controls (setPresetGroup / setVsync / setting-vsync)
+document.querySelectorAll("#setPresetGroup .seg-btn, #setVsync, #setting-vsync").forEach((btn) => {
   btn.addEventListener("click", () => {
     const p = btn.dataset.preset;
     if (p === "30-eco") { runtimeSettings.fps = 30; runtimeSettings.vsync = false; }

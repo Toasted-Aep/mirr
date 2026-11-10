@@ -64,6 +64,11 @@ custom-protocol = ["tauri/custom-protocol"]
 [profile.release]
 opt-level = 3
 
+[lib]
+name = "mirr_lib"
+path = "src/lib.rs"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [[bin]]
 name = "mirr"
 path = "src/main.rs"
