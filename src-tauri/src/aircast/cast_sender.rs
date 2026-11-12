@@ -124,7 +124,7 @@ pub fn start_cast(target_ip: &str, app: Option<&AppHandle>) -> anyhow::Result<()
     let target_ping = target_str.clone();
     let app_ping = app_handle.clone();
 
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(4));
         loop {
             tokio::select! {

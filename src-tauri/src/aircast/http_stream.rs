@@ -38,7 +38,7 @@ pub fn ensure_http_server(app_handle: Option<tauri::AppHandle>) {
 
     let state = AppState { app_handle };
 
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let app = Router::new()
             // Outbound Audio chunked streaming
             .route("/aircast/stream.wav", get(audio_stream_handler))
